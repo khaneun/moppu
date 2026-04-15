@@ -418,10 +418,13 @@ async function loadPipeline() {
 // ---- Pipeline run / log ----
 
 document.getElementById('btn-pipeline-run').addEventListener('click', async () => {
-  if (!confirm('파이프라인을 즉시 실행합니다.\n현재 진행 중인 수집에 영향을 줄 수 있습니다.\n\n계속하시겠습니까?')) return;
+  if (!confirm('파이프라인을 실행합니다.\n로컬 수집기(감시 모드 실행 중)에도 신호를 전송합니다.\n\n계속하시겠습니까?')) return;
   const btn = document.getElementById('btn-pipeline-run');
   btn.disabled = true;
   try {
+    // 로컬 수집기 트리거 (watch 모드 실행 중이면 즉시 반응)
+    API.post('/api/collect/request-run', {}).catch(() => {});
+    // EC2 측 동기화 (video_list_entries 갱신)
     await API.post('/api/pipeline/run', {});
     loadPipeline();
   } catch (e) {

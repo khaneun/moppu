@@ -46,6 +46,7 @@ _sessions: set[str] = set()
 _pipeline_running: bool = False
 _pipeline_run_msg: str = ""
 _deleted_embedding_count: int = 0
+_local_run_requested: bool = False   # 로컬 수집기 실행 요청 플래그
 
 
 def _emergency_stop_path() -> Path:
@@ -964,6 +965,25 @@ def receive_transcript(req: TranscriptReceiveRequest):
     log.info("collect.transcript_received", video_id=req.video_id, chunks=len(chunks))
     _write_pipeline_log(f"[LOCAL] 수신·임베딩: {req.video_id} ({len(chunks)}청크, {req.language})")
     return {"ok": True, "skipped": False, "video_id": req.video_id, "chunks": len(chunks)}
+
+
+@app.post("/api/collect/request-run")
+def request_local_run():
+    """대시보드 → 로컬 수집기 실행 요청 (로컬이 폴링해서 감지)."""
+    global _local_run_requested
+    _local_run_requested = True
+    _write_pipeline_log("[DASHBOARD] 로컬 수집기 실행 요청됨")
+    return {"ok": True, "message": "로컬 수집기에 실행 신호 전송됨"}
+
+
+@app.get("/api/collect/poll")
+def poll_local_run():
+    """로컬 수집기가 주기적으로 호출 — 실행 요청 여부 확인 및 클리어."""
+    global _local_run_requested
+    requested = _local_run_requested
+    if requested:
+        _local_run_requested = False
+    return {"requested": requested}
 
 
 @app.post("/api/collect/process")
