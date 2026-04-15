@@ -118,15 +118,18 @@ class TraderAgent:
         retrieved = self._retriever.retrieve(user_message)
         system = self._prompt.build_system_prompt() + _CHAT_ADDENDUM
 
-        lines = ["참고 자료 (YouTube 자막 발췌):"]
-        if not retrieved:
-            lines.append("(관련 자막 없음)")
-        for h in retrieved:
-            lines.append(
-                f"- [{h.published_at_iso or '날짜 불명'}] {h.video_title or h.video_id}:\n"
-                f"  {h.text.strip()[:800]}"
-            )
-        rag_user = "\n".join(lines) + f"\n\n질문: {user_message}"
+        # 관련 자막이 있을 때만 RAG 컨텍스트를 주입
+        # 없으면 페르소나 지식만으로 답변
+        if retrieved:
+            lines = ["[관련 영상 발췌 — 필요시 참고]"]
+            for h in retrieved:
+                lines.append(
+                    f"- [{h.published_at_iso or '날짜 불명'}] {h.video_title or h.video_id}:\n"
+                    f"  {h.text.strip()[:800]}"
+                )
+            rag_user = "\n".join(lines) + f"\n\n질문: {user_message}"
+        else:
+            rag_user = f"질문: {user_message}"
 
         messages: list[ChatMessage] = []
         for m in history or []:
