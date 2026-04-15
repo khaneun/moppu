@@ -477,55 +477,42 @@ def _next_midnight_kst() -> datetime:
 # Windows Task Scheduler 등록
 # ------------------------------------------------------------------ #
 
-def _run_powershell(ps_lines: list[str]) -> tuple[bool, str, str]:
-    """PowerShell 명령을 임시 .ps1 파일로 실행 (인자 이스케이프 문제 우회)."""
-    import subprocess, tempfile
-    ps_content = "\n".join(ps_lines)
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".ps1",
-                                     delete=False, encoding="utf-8") as f:
-        f.write(ps_content)
-        tmp = f.name
-    try:
-        result = subprocess.run(
-            ["powershell", "-ExecutionPolicy", "Bypass", "-File", tmp],
-            capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
-        )
-        return result.returncode == 0, result.stdout, result.stderr
-    finally:
-        Path(tmp).unlink(missing_ok=True)
+def _schtasks(args: list[str]) -> tuple[bool, str]:
+    """schtasks.exe 실행 — PowerShell cmdlet 호환성 문제 없음."""
+    import subprocess
+    result = subprocess.run(
+        ["schtasks"] + args,
+        capture_output=True, text=True,
+        encoding="cp949", errors="replace",
+    )
+    output = (result.stdout + result.stderr).strip()
+    return result.returncode == 0, output
 
 
 def register_task_scheduler(run_time: str = "00:05") -> bool:
-    """Windows 작업 스케줄러에 일일 실행 작업 등록."""
+    """schtasks.exe로 매일 자동 실행 작업 등록."""
     if sys.platform != "win32":
         log.warning("Windows가 아닙니다. Task Scheduler 등록 건너뜀.")
         return False
 
     python_exe  = sys.executable
     script_path = str(Path(__file__).resolve())
-    work_dir    = str(Path(__file__).parent)
+    tr          = f'"{python_exe}" "{script_path}"'
 
-    ps_lines = [
-        '$ErrorActionPreference = "Stop"',
-        f'$exe     = "{python_exe}"',
-        f'$script  = "{script_path}"',
-        f'$workdir = "{work_dir}"',
-        f'$time    = "{run_time}"',
-        '$action   = New-ScheduledTaskAction -Execute $exe -Argument $script -WorkingDirectory $workdir',
-        '$trigger  = New-ScheduledTaskTrigger -Daily -At $time',
-        '$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew',
-        'Register-ScheduledTask -TaskName "MoppuLocalCollector" '
-        '-Description "Moppu YouTube 자막 수집기" '
-        '-Action $action -Trigger $trigger -Settings $settings -Force | Out-Null',
-        'Write-Output "REGISTERED"',
-    ]
-    ok, stdout, stderr = _run_powershell(ps_lines)
-    if "REGISTERED" in stdout:
-        log.info(f"✓ Task Scheduler 등록 완료 (매일 {run_time})")
-        return True
-    log.warning(f"Task Scheduler 등록 실패 (rc={ok}):\nstdout={stdout[:200]}\nstderr={stderr[:200]}")
-    return False
+    ok, out = _schtasks([
+        "/Create",
+        "/TN", "MoppuLocalCollector",
+        "/TR", tr,
+        "/SC", "DAILY",
+        "/ST", run_time,
+        "/RL", "HIGHEST",   # 높은 권한으로 실행
+        "/F",               # 기존 작업 덮어쓰기
+    ])
+    if ok:
+        log.info(f"✓ Task Scheduler 등록 완료: MoppuLocalCollector (매일 {run_time})")
+    else:
+        log.warning(f"Task Scheduler 등록 실패: {out[:200]}")
+    return ok
 
 
 def register_watch_startup() -> bool:
@@ -535,27 +522,21 @@ def register_watch_startup() -> bool:
 
     python_exe  = sys.executable
     script_path = str(Path(__file__).resolve())
-    work_dir    = str(Path(__file__).parent)
+    tr          = f'"{python_exe}" "{script_path}" --watch'
 
-    ps_lines = [
-        '$ErrorActionPreference = "Stop"',
-        f'$exe     = "{python_exe}"',
-        f'$script  = "{script_path} --watch"',
-        f'$workdir = "{work_dir}"',
-        '$action   = New-ScheduledTaskAction -Execute $exe -Argument $script -WorkingDirectory $workdir',
-        '$trigger  = New-ScheduledTaskTrigger -AtLogOn',
-        '$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan) -MultipleInstances IgnoreNew',
-        'Register-ScheduledTask -TaskName "MoppuLocalCollectorWatch" '
-        '-Description "Moppu 감시 모드 (로그인 시 자동 시작)" '
-        '-Action $action -Trigger $trigger -Settings $settings -Force | Out-Null',
-        'Write-Output "REGISTERED"',
-    ]
-    ok, stdout, stderr = _run_powershell(ps_lines)
-    if "REGISTERED" in stdout:
-        log.info("✓ 감시 모드 시작 프로그램 등록 완료")
-        return True
-    log.warning(f"감시 모드 등록 실패:\nstdout={stdout[:200]}\nstderr={stderr[:200]}")
-    return False
+    ok, out = _schtasks([
+        "/Create",
+        "/TN", "MoppuLocalCollectorWatch",
+        "/TR", tr,
+        "/SC", "ONLOGON",
+        "/RL", "HIGHEST",
+        "/F",
+    ])
+    if ok:
+        log.info("✓ 감시 모드 등록 완료: MoppuLocalCollectorWatch (로그인 시 자동 시작)")
+    else:
+        log.warning(f"감시 모드 등록 실패: {out[:200]}")
+    return ok
 
 
 # ------------------------------------------------------------------ #
