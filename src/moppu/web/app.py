@@ -287,6 +287,34 @@ def run_pipeline():
     return {"started": True, "message": "파이프라인 실행을 시작했습니다."}
 
 
+@app.get("/api/logs/app")
+def app_log():
+    """애플리케이션 로그 — journald(EC2) 또는 data/app.log(로컬) 반환."""
+    import subprocess
+
+    # 1) journald 시도 (EC2 systemd 환경)
+    try:
+        result = subprocess.run(
+            ["journalctl", "-u", "moppu-dashboard", "--no-pager", "-n", "300",
+             "--output=short-iso", "--no-hostname"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            lines = result.stdout.strip().splitlines()
+            return {"lines": lines, "source": "journald"}
+    except Exception:
+        pass
+
+    # 2) 파일 폴백 (로컬 개발)
+    if _rt:
+        path = _rt.cfg.app.data_dir / "app.log"
+        if path.exists():
+            lines = path.read_text(encoding="utf-8").splitlines()
+            return {"lines": lines[-300:], "source": "file"}
+
+    return {"lines": ["로그를 찾을 수 없습니다."], "source": "none"}
+
+
 @app.get("/api/pipeline/log")
 def pipeline_log():
     """파이프라인 실행 로그 파일의 마지막 200줄을 반환합니다."""

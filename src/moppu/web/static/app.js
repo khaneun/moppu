@@ -455,6 +455,30 @@ document.getElementById('btn-pipeline-log').addEventListener('click', () => {
 
 document.getElementById('btn-log-refresh').addEventListener('click', loadPipelineLog);
 
+// ---- App log ----
+
+async function loadAppLog() {
+  const body = document.getElementById('app-log-body');
+  body.innerHTML = '<p class="text-muted">로딩 중...</p>';
+  try {
+    const data = await API.get('/api/logs/app');
+    if (!data.lines || !data.lines.length) {
+      body.innerHTML = '<div class="log-empty">로그가 없습니다.</div>';
+      return;
+    }
+    const src = data.source === 'journald' ? 'journald' : '파일';
+    body.innerHTML = `<p style="font-size:.7rem;color:var(--text-muted);margin-bottom:6px;">출처: ${src}</p><pre class="log-content">${escHtml(data.lines.join('\n'))}</pre>`;
+    const pre = body.querySelector('.log-content');
+    if (pre) pre.scrollTop = pre.scrollHeight;
+  } catch (e) { body.innerHTML = `<p class="text-warn">${e.message}</p>`; }
+}
+
+document.getElementById('btn-app-log').addEventListener('click', () => {
+  document.getElementById('app-log-modal').style.display = 'flex';
+  loadAppLog();
+});
+document.getElementById('btn-app-log-refresh').addEventListener('click', loadAppLog);
+
 // ---- Pipeline edit buttons ----
 
 document.getElementById('btn-edit-channels').addEventListener('click', openChannelModal);

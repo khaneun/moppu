@@ -55,7 +55,10 @@ def build_runtime() -> Runtime:
     )
 
     youtube = YoutubeClient(cfg.ingestion.ytdlp.model_dump())
-    transcripts = TranscriptFetcher(cfg.ingestion.transcript_languages)
+    transcripts = TranscriptFetcher(
+        cfg.ingestion.transcript_languages,
+        cookies_file=settings.youtube_cookies_file,
+    )
     watcher = ChannelWatcher(SessionLocal, youtube)
 
     pipeline = Pipeline(

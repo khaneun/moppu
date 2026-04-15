@@ -64,6 +64,9 @@ class Settings(BaseSettings):
     moppu_channels_path: Path = Path("config/channels.yaml")
     log_level: str = "INFO"
 
+    # YouTube cookies (Netscape format) — EC2 IP 차단 우회용
+    youtube_cookies_file: Path | None = None
+
     # Dashboard auth
     dashboard_id: str = "moppu"
     dashboard_password: str = "Gksrlgns12!"

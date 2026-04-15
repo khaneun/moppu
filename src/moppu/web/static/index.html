@@ -170,6 +170,9 @@
           <button id="btn-emergency" class="btn btn-emergency">긴급 중단</button>
           <button id="btn-resume" class="btn btn-ok" style="display:none;">운영 재개</button>
           <p id="emergency-status" class="text-muted" style="margin-top:8px;"></p>
+          <div style="border-top:1px solid var(--border);margin-top:14px;padding-top:12px;">
+            <button id="btn-app-log" class="btn btn-secondary" style="width:100%;">앱 로그 보기</button>
+          </div>
         </div>
 
         <div class="card">
@@ -233,6 +236,20 @@
         <button class="modal-close" onclick="closeModal('list-modal')">&times;</button>
       </div>
       <div class="modal-body" id="list-modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ===== App Log Modal ===== -->
+  <div id="app-log-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3 style="margin:0;color:#e2e8f0;">애플리케이션 로그</h3>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button id="btn-app-log-refresh" class="btn btn-secondary btn-sm">↻ 새로고침</button>
+          <button class="modal-close" onclick="closeModal('app-log-modal')">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body" id="app-log-body"></div>
     </div>
   </div>
 

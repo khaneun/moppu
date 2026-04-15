@@ -1,11 +1,10 @@
 """Transcript extraction.
 
-Primary path: ``youtube-transcript-api`` (fast, unauthenticated).
-Fallback path: ``yt-dlp`` subtitle download — works on cloud IPs where
-YouTube blocks the transcript API.
+Primary path: ``youtube-transcript-api`` (fast).
+Fallback path: ``yt-dlp`` subtitle download.
 
-The fallback is triggered automatically on any exception from the primary
-path, so cloud deployments (AWS, GCP, etc.) work without extra config.
+Both paths support cookies (Netscape format) to bypass EC2/cloud IP blocks.
+Set YOUTUBE_COOKIES_FILE in .env to enable cookie-based auth.
 """
 
 from __future__ import annotations
@@ -14,7 +13,6 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from tenacity import retry, stop_after_attempt, wait_exponential
 from youtube_transcript_api import (
     NoTranscriptFound,
     TranscriptsDisabled,
@@ -35,26 +33,45 @@ class TranscriptResult:
 
 
 class TranscriptFetcher:
-    def __init__(self, preferred_languages: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        preferred_languages: list[str] | None = None,
+        cookies_file: Path | str | None = None,
+    ) -> None:
         self.preferred_languages = preferred_languages or ["ko", "en"]
-        self._api = YouTubeTranscriptApi()
+        self._cookies_file = Path(cookies_file) if cookies_file else None
+        self._api = self._build_api()
+
+    def _build_api(self) -> YouTubeTranscriptApi:
+        if self._cookies_file and self._cookies_file.exists():
+            import requests
+            from http.cookiejar import MozillaCookieJar
+            jar = MozillaCookieJar()
+            try:
+                jar.load(str(self._cookies_file), ignore_discard=True, ignore_expires=True)
+                session = requests.Session()
+                session.cookies = jar  # type: ignore[assignment]
+                log.info("transcript.cookies_loaded", path=str(self._cookies_file))
+                return YouTubeTranscriptApi(http_client=session)
+            except Exception as e:
+                log.warning("transcript.cookies_load_failed", err=str(e))
+        return YouTubeTranscriptApi()
 
     def fetch(self, video_id: str) -> TranscriptResult | None:
-        """Fetch transcript, falling back to yt-dlp on cloud IP blocks."""
+        """자막 수집 — API 실패 시 yt-dlp로 fallback."""
         try:
             return self._fetch_via_api(video_id)
         except TranscriptsDisabled:
             log.info("transcript.disabled", video_id=video_id)
             return None
         except Exception as e:
-            log.warning("transcript.api_failed_trying_ytdlp", video_id=video_id, err=str(e))
+            log.warning("transcript.api_failed_trying_ytdlp", video_id=video_id, err=str(e)[:200])
             try:
                 return self._fetch_via_ytdlp(video_id)
             except Exception as e2:
                 log.warning("transcript.ytdlp_failed", video_id=video_id, err=str(e2))
-                raise RuntimeError(str(e)) from e2  # re-raise original error
+                raise RuntimeError(str(e)) from e2
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10), reraise=True)
     def _fetch_via_api(self, video_id: str) -> TranscriptResult | None:
         transcript_list = self._api.list(video_id)
 
@@ -89,15 +106,14 @@ class TranscriptFetcher:
         )
 
     def _fetch_via_ytdlp(self, video_id: str) -> TranscriptResult | None:
-        """Download subtitles via yt-dlp (works on cloud IPs)."""
+        """yt-dlp 자막 다운로드 (쿠키 사용 가능)."""
         import yt_dlp
 
         url = f"https://www.youtube.com/watch?v={video_id}"
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # 선호 언어 순서로 자막 시도
             sub_langs = self.preferred_languages + ["en"]
-            opts = {
+            opts: dict = {
                 "skip_download": True,
                 "quiet": True,
                 "writesubtitles": True,
@@ -107,15 +123,17 @@ class TranscriptFetcher:
                 "outtmpl": str(Path(tmpdir) / "%(id)s.%(ext)s"),
                 "ignoreerrors": True,
             }
+            if self._cookies_file and self._cookies_file.exists():
+                opts["cookiefile"] = str(self._cookies_file)
+                log.info("transcript.ytdlp_using_cookies", path=str(self._cookies_file))
+
             with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
 
-            # .vtt 파일 찾기 (선호 언어 우선)
             vtt_files = list(Path(tmpdir).glob(f"{video_id}*.vtt"))
             if not vtt_files:
-                raise RuntimeError("yt-dlp로 자막 파일을 찾을 수 없습니다.")
+                raise RuntimeError("자막 파일을 찾을 수 없습니다 (bot 차단 또는 자막 없음).")
 
-            # 선호 언어 파일 우선 선택
             chosen = vtt_files[0]
             for lang in self.preferred_languages:
                 matches = [f for f in vtt_files if f".{lang}." in f.name]
@@ -136,16 +154,14 @@ class TranscriptFetcher:
 
 
 def _parse_vtt(vtt: str) -> str:
-    """VTT 자막에서 텍스트만 추출 (타임스탬프·태그 제거)."""
+    """VTT 자막에서 텍스트만 추출."""
     import re
     lines = []
     for line in vtt.splitlines():
         line = line.strip()
         if not line or line.startswith("WEBVTT") or "-->" in line:
             continue
-        # HTML 태그 제거
         line = re.sub(r"<[^>]+>", "", line)
-        # 중복 줄 제거 (VTT는 같은 텍스트를 여러 번 출력하는 경우 있음)
         if lines and lines[-1] == line:
             continue
         if line:
@@ -158,12 +174,10 @@ def _clean(s: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> list[str]:
-    """Simple char-based chunker good enough for transcript retrieval."""
     if chunk_size <= 0:
         raise ValueError("chunk_size must be positive")
     if overlap >= chunk_size:
         raise ValueError("overlap must be smaller than chunk_size")
-
     chunks: list[str] = []
     i = 0
     n = len(text)
