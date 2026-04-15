@@ -1,0 +1,41 @@
+# List of YouTube channels to track. Copy to config/channels.yaml.
+#
+# Each entry needs either `channel_id` (UC...) or `handle` (@...).
+# `tags` are free-form labels used to filter which channels feed which agent.
+
+channels:
+  - channel_id: UCxxxxxxxxxxxxxxxxxxxx
+    name: Example Stock Channel
+    tags: [kr-stocks, macro]
+    enabled: true
+
+  - handle: "@someinvestor"
+    name: Some Investor
+    tags: [us-stocks]
+    enabled: true
+
+# Manually curated video lists.
+#
+# Unlike channels, these are NOT polled — only the URLs listed here are ever
+# ingested. To add new videos, append URLs to the `videos` list and re-run:
+#
+#   moppu sync-video-lists && moppu ingest-lists
+#
+# Each item under `videos` can be any of:
+#   - Full watch URL:  https://www.youtube.com/watch?v=VIDEO_ID
+#   - Short URL:       https://youtu.be/VIDEO_ID
+#   - Shorts URL:      https://www.youtube.com/shorts/VIDEO_ID
+#   - Bare video ID:   VIDEO_ID  (11-char alphanumeric)
+
+video_lists:
+  - name: semicon-highlights
+    tags: [kr-stocks, semiconductor]
+    enabled: true
+    videos:
+      - https://www.youtube.com/watch?v=dQw4w9WgXcQ
+      - https://youtu.be/XXXXXXXXXXX
+
+  - name: macro-picks
+    tags: [macro, us-stocks]
+    enabled: false   # disabled lists are skipped during ingest
+    videos: []

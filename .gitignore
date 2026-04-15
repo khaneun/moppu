@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual envs
+.venv/
+venv/
+env/
+
+# ── Secrets & local config ────────────────────────────────────────────────────
+# Never commit populated values of these files.
+.env
+.env.*
+!.env.example
+
+# Actual runtime configs (copy from *.example.* and fill in)
+config/config.yaml
+config/channels.yaml
+
+# Custom prompt files (the example template is committed; personal edits are not)
+config/prompts/*.md
+!config/prompts/*.example.md
+
+# KIS token cache (written at runtime)
+kis_token.json
+*_token.json
+
+# ── Runtime data & artifacts ──────────────────────────────────────────────────
+data/
+*.db
+*.sqlite
+*.sqlite3
+chroma_db/
+logs/
+*.log
+
+# ── IDE & OS ──────────────────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

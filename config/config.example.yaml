@@ -1,0 +1,82 @@
+# Copy to config/config.yaml and edit for your environment.
+
+app:
+  name: moppu
+  data_dir: ./data
+  log_level: INFO
+
+storage:
+  # SQLAlchemy URL. SQLite by default; switch to Postgres when scaling.
+  database_url: sqlite:///./data/moppu.db
+  vector_store:
+    provider: chroma
+    persist_dir: ./data/chroma
+    collection: youtube_transcripts
+
+embeddings:
+  # "sentence-transformers" (local) | "openai" | "google"
+  provider: sentence-transformers
+  model: BAAI/bge-m3
+  # Chunking (chars). Transcripts are converted to chunks before embedding.
+  chunk_size: 1200
+  chunk_overlap: 150
+
+# LLM provider used by the agent. Swap freely between providers/models.
+llm:
+  # "openai" | "anthropic" | "google"
+  provider: anthropic
+  model: claude-sonnet-4-6
+  temperature: 0.2
+  max_tokens: 2048
+  # Optional per-provider overrides
+  providers:
+    openai:
+      model: gpt-4.1
+    anthropic:
+      model: claude-sonnet-4-6
+    google:
+      model: gemini-2.5-pro
+
+ingestion:
+  # How many new videos to process per poll cycle
+  batch_size: 5
+  # Polling interval (seconds) when PubSubHubbub push is not configured
+  poll_interval_sec: 900
+  # Transcript language preference order
+  transcript_languages: [ko, en]
+  # yt-dlp options
+  ytdlp:
+    skip_download: true
+    quiet: true
+
+agent:
+  # Prompt template files (under config/prompts/). The prompt is (re)built
+  # from these templates + retrieved RAG context every time a new video is
+  # ingested.
+  prompt_template: prompts/trader.system.md
+  # Top-k retrieval for RAG
+  retrieval_top_k: 8
+  retrieval_min_score: 0.2
+  # Safety guardrails
+  max_order_krw: 1000000
+  dry_run: true
+
+broker:
+  # Currently only "kis" is implemented.
+  provider: kis
+  kis:
+    base_url_real: https://openapi.koreainvestment.com:9443
+    base_url_paper: https://openapivts.koreainvestment.com:29443
+    # WebSocket endpoint used for real-time quotes (not required for v1)
+    ws_url_real: ws://ops.koreainvestment.com:21000
+    ws_url_paper: ws://ops.koreainvestment.com:31000
+
+telegram:
+  enabled: true
+  # The agent polls if no webhook is configured.
+  webhook_url: null
+
+scheduler:
+  # If true, run APScheduler loop in-process.
+  enabled: true
+  poll_channels_cron: "*/15 * * * *"
