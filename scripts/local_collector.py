@@ -679,7 +679,29 @@ def load_config() -> dict[str, Any]:
         print(f"\n설정 파일이 없습니다. 먼저 --setup 을 실행하세요.")
         print(f"  python {Path(__file__).name} --setup\n")
         sys.exit(1)
-    return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+
+    cfg = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+
+    # 신규 항목 자동 추가 (git pull 후 기존 설정 마이그레이션)
+    updated = False
+    if "shutdown_after_run" not in cfg:
+        cfg["shutdown_after_run"] = False
+        updated = True
+        log.info("shutdown_after_run 항목 추가됨 (기본값: false). 자동 종료 원하면 true 로 변경하세요.")
+    if updated:
+        CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return cfg
+
+
+def _schedule_shutdown(delay_sec: int = 180) -> None:
+    """Windows 자동 종료를 예약합니다."""
+    if sys.platform != "win32":
+        log.info(f"Windows가 아닙니다. 자동 종료 건너뜀.")
+        return
+    import subprocess
+    log.info(f"⏱ {delay_sec // 60}분 후 컴퓨터를 종료합니다. 취소: shutdown /a")
+    subprocess.run(["shutdown", "/s", "/f", "/t", str(delay_sec)], check=False)
 
 
 if __name__ == "__main__":
@@ -703,3 +725,6 @@ if __name__ == "__main__":
         watch_mode(client, cfg, poll_interval)
     else:
         run_collect(client, cfg)
+        # 스케줄 실행 완료 후 자동 종료 (shutdown_after_run: true 일 때만)
+        if cfg.get("shutdown_after_run"):
+            _schedule_shutdown(delay_sec=180)
