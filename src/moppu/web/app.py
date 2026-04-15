@@ -254,29 +254,22 @@ def run_pipeline():
         raise HTTPException(409, "파이프라인이 이미 실행 중입니다.")
 
     def _run() -> None:
-        global _pipeline_running, _pipeline_run_msg
+        global _pipeline_running, _pipeline_run_msg, _local_run_requested
         _pipeline_running = True
         try:
-            _write_pipeline_log("=== 수동 실행 시작 ===")
+            _write_pipeline_log("=== 대시보드 실행 요청 ===")
+
+            # 1) 영상 목록 DB 동기화 (YouTube 호출 없음 — 안전)
             _pipeline_run_msg = "영상 목록 동기화 중..."
             _write_pipeline_log(_pipeline_run_msg)
             _rt.pipeline.sync_video_lists()
-            _pipeline_run_msg = "영상 수집 중..."
-            _write_pipeline_log(_pipeline_run_msg)
-            n = _rt.pipeline.ingest_from_lists()
-            _write_pipeline_log(f"영상 수집 완료: {n}건")
-            _pipeline_run_msg = f"수집 완료 ({n}건) — 요약 생성 중..."
-            _write_pipeline_log("요약 및 추천 질문 생성 중...")
-            from moppu.agent.daily_summary import generate_and_save
-            generate_and_save(_rt.session_factory, _rt.llm, _rt.cfg.app.data_dir, force=True)
-            _write_pipeline_log("요약 생성 완료")
-            # 수동 실행 마커 생성 → 당일 자정 스케줄러 실행 방지
-            today_str = datetime.now(KST).strftime("%Y-%m-%d")
-            (_rt.cfg.app.data_dir / f".pipeline_ran_{today_str}").write_text(
-                datetime.now(timezone.utc).isoformat()
-            )
-            _pipeline_run_msg = f"완료 ({n}건 수집)"
-            _write_pipeline_log(f"=== 수동 실행 완료 ({n}건) ===")
+            _write_pipeline_log("영상 목록 동기화 완료")
+
+            # 2) 로컬 수집기에 실행 신호
+            _local_run_requested = True
+            _pipeline_run_msg = "로컬 수집기에 실행 신호 전송됨 (watch 모드 대기 중...)"
+            _write_pipeline_log("[SIGNAL] 로컬 수집기 실행 요청 → /api/collect/poll 대기")
+
         except Exception as e:
             _pipeline_run_msg = f"오류: {e}"
             _write_pipeline_log(f"[ERROR] {e}")
