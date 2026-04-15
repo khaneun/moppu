@@ -29,10 +29,18 @@ class PromptContext:
 
 
 class PromptBuilder:
-    def __init__(self, template_path: Path | str, session_factory, *, recent_video_count: int = 20) -> None:
+    def __init__(
+        self,
+        template_path: Path | str,
+        session_factory,
+        *,
+        recent_video_count: int = 20,
+        persona_path: Path | str | None = None,
+    ) -> None:
         self._template_path = Path(template_path)
         self._sf = session_factory
         self._recent_n = recent_video_count
+        self._persona_path = Path(persona_path) if persona_path else None
 
     def context(self) -> PromptContext:
         with self._sf() as session:  # type: Session
@@ -58,6 +66,11 @@ class PromptBuilder:
         )
 
     def build_system_prompt(self) -> str:
+        # 페르소나 파일이 있으면 우선 사용 (합성된 행동 양식)
+        if self._persona_path and self._persona_path.exists():
+            return self._persona_path.read_text(encoding="utf-8")
+
+        # 페르소나 없으면 기존 템플릿 fallback
         tmpl = self._template_path.read_text(encoding="utf-8")
         ctx = self.context()
         return (

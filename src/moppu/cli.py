@@ -100,6 +100,22 @@ def ingest_lists(
         _try_generate_summary(rt)
 
 
+@app.command("update-persona")
+def update_persona(
+    force: Annotated[bool, typer.Option("--force", help="기존 페르소나 무시하고 전체 재생성")] = False,
+) -> None:
+    """수집된 transcript로부터 LSY Agent 페르소나를 생성·업데이트합니다."""
+    from moppu.agent.persona import generate
+    rt = build_runtime()
+    typer.echo("페르소나 생성 중 (LLM 호출)...")
+    result = generate(rt.session_factory, rt.llm, rt.cfg.app.data_dir, force=force)
+    if result:
+        path = rt.cfg.app.data_dir / "agent_persona.md"
+        typer.echo(f"✓ 페르소나 저장: {path} ({len(result)}자)")
+    else:
+        typer.echo("수집된 영상이 없어 페르소나를 생성할 수 없습니다.")
+
+
 @app.command("poll")
 def poll() -> None:
     """One polling cycle for new videos."""

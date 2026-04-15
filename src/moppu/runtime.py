@@ -73,7 +73,11 @@ def build_runtime() -> Runtime:
     )
 
     llm = build_llm(cfg.llm, settings)
-    prompt_builder = PromptBuilder(cfg.agent.prompt_template, SessionLocal)
+    prompt_builder = PromptBuilder(
+        cfg.agent.prompt_template,
+        SessionLocal,
+        persona_path=cfg.app.data_dir / "agent_persona.md",
+    )
     retriever = RAGRetriever(
         embedder=embedder,
         vector_store=vector_store,
