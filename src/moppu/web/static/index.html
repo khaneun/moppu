@@ -92,11 +92,16 @@
           <div class="pipeline-header">
             <h3 style="margin-bottom:0;">파이프라인 현황</h3>
             <div style="display:flex;gap:6px;">
+              <button id="btn-pipeline-refresh" class="btn btn-secondary btn-sm" title="새로고침">↻</button>
               <button id="btn-pipeline-run" class="btn btn-primary btn-sm">▶ 실행</button>
               <button id="btn-pipeline-log" class="btn btn-secondary btn-sm">로그</button>
             </div>
           </div>
-          <div id="pipeline-run-status" class="run-status" style="display:none;"></div>
+          <div id="pipeline-run-status" class="run-status" style="display:none;">
+            <span id="pipeline-run-msg" style="flex:1;"></span>
+            <button onclick="document.getElementById('pipeline-run-status').style.display='none';"
+                    style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 2px;">×</button>
+          </div>
 
           <div class="pipeline-sub-cards">
             <div class="sub-card">

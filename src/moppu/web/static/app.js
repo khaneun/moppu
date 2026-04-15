@@ -368,20 +368,21 @@ async function loadPipeline() {
 
     // 실행 상태 표시
     const runStatusEl = document.getElementById('pipeline-run-status');
+    const runMsgEl    = document.getElementById('pipeline-run-msg');
     if (data.pipeline_running) {
       runStatusEl.style.display = 'flex';
       runStatusEl.className = 'run-status';
-      runStatusEl.innerHTML = `<div class="spinner"></div>${escHtml(data.pipeline_run_msg || '실행 중...')}`;
+      runMsgEl.innerHTML = `<div class="spinner" style="display:inline-block;margin-right:6px;"></div>${escHtml(data.pipeline_run_msg || '실행 중...')}`;
       if (!_pipelinePolling) _pipelinePolling = setInterval(loadPipeline, 2000);
     } else {
       if (_pipelinePolling) { clearInterval(_pipelinePolling); _pipelinePolling = null; }
+      // 실행 완료 후: pipeline.log 최신 줄로 상태 업데이트
       if (data.pipeline_run_msg) {
-        const isDone = !data.pipeline_run_msg.startsWith('오류');
+        const isErr = data.pipeline_run_msg.startsWith('오류');
         runStatusEl.style.display = 'flex';
-        runStatusEl.className = 'run-status ' + (isDone ? 'done' : 'error');
-        runStatusEl.innerHTML = escHtml(data.pipeline_run_msg);
-      } else {
-        runStatusEl.style.display = 'none';
+        runStatusEl.className = 'run-status ' + (isErr ? 'error' : 'done');
+        // 최신 로그 줄도 함께 보여주기 (로컬 수집 진행 반영)
+        _updateStatusFromLog(runMsgEl, data.pipeline_run_msg);
       }
     }
 
@@ -413,6 +414,23 @@ async function loadPipeline() {
         <div class="embed-meta">${pct}% 완료${failed > 0 ? ` · 실패 ${failed}건` : ''}${delEmb > 0 ? ` · 삭제됨 ${delEmb}건` : ''}</div>
       </div>`;
   } catch (e) { if (e.message !== '인증 필요') console.error('loadPipeline', e); }
+}
+
+// ---- Pipeline refresh ----
+
+document.getElementById('btn-pipeline-refresh').addEventListener('click', () => loadPipeline());
+
+// 로그 파일 최신 줄로 상태 메시지 업데이트 (로컬 수집 완료 등 반영)
+async function _updateStatusFromLog(msgEl, fallback) {
+  try {
+    const data = await API.get('/api/pipeline/log');
+    const lines = (data.lines || []).filter(l => l.trim());
+    const latest = lines[lines.length - 1] || fallback;
+    // 타임스탬프 제거 후 표시
+    msgEl.textContent = latest.replace(/^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]\s*/, '');
+  } catch (_) {
+    msgEl.textContent = fallback;
+  }
 }
 
 // ---- Pipeline run / log ----
