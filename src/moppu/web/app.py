@@ -69,6 +69,17 @@ def _estimate_cost(provider: str, model: str, inp: int, out: int) -> float:
     return (inp * rates[0] + out * rates[1]) / 1_000_000
 
 
+def _send_telegram(text: str) -> None:
+    """설정된 Telegram 채팅으로 메시지를 전송합니다."""
+    if _rt is None or not _rt.settings.telegram_bot_token:
+        return
+    from moppu.bot.telegram_bot import send_telegram_message
+    try:
+        send_telegram_message(_rt.settings, text)
+    except Exception as e:
+        log.warning("telegram.notify_failed", err=str(e))
+
+
 def _write_pipeline_log(msg: str) -> None:
     if _rt is None:
         return
@@ -963,14 +974,34 @@ class CollectDoneRequest(BaseModel):
     success: int = 0
     total: int = 0
     message: str = "완료"
+    videos: list[dict[str, Any]] = []   # [{video_id, title, url}]
 
 
 @app.post("/api/collect/done")
 def collect_done(req: CollectDoneRequest):
-    """로컬 수집기가 작업 완료 후 호출 — EC2 상태 메시지 업데이트."""
+    """로컬 수집기가 작업 완료 후 호출 — EC2 상태 메시지 업데이트 + Telegram 알림."""
     global _pipeline_run_msg
     _pipeline_run_msg = req.message
     _write_pipeline_log(f"[LOCAL 완료] {req.message}")
+
+    # 수집된 영상 있으면 텔레그램 알림
+    if req.videos:
+        lines = [f"📥 *수집 완료 ({req.success}/{req.total}건)*"]
+        for v in req.videos[:10]:
+            title = (v.get("title") or v.get("video_id") or "")[:35]
+            url   = v.get("url") or f"https://www.youtube.com/watch?v={v.get('video_id','')}"
+            lines.append(f"• [{title}]({url})")
+        if len(req.videos) > 10:
+            lines.append(f"_외 {len(req.videos) - 10}건_")
+        _send_telegram("\n".join(lines))
+    return {"ok": True}
+
+
+@app.post("/api/notify/startup")
+def notify_collector_startup():
+    """로컬 수집기가 감시 모드 시작 시 호출 — Telegram 알림 전송."""
+    _send_telegram("🖥 *수집 머신 시작*\n로컬 수집기 감시 모드가 시작되었습니다.")
+    _write_pipeline_log("[LOCAL] 수집 머신 감시 모드 시작됨")
     return {"ok": True}
 
 

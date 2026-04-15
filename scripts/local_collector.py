@@ -102,7 +102,12 @@ class EC2Client:
         except Exception as e:
             log.warning(f"처리 트리거 실패: {e}")
 
-    def notify_done(self, success: int, total: int) -> None:
+    def notify_done(
+        self,
+        success: int,
+        total: int,
+        videos: list[dict] | None = None,
+    ) -> None:
         """수집 완료 결과를 EC2에 알립니다."""
         if total == 0:
             msg = "수집할 항목 없음"
@@ -113,12 +118,20 @@ class EC2Client:
         try:
             self._session.post(
                 f"{self.base_url}/api/collect/done",
-                json={"success": success, "total": total, "message": msg},
-                timeout=5,
+                json={"success": success, "total": total, "message": msg, "videos": videos or []},
+                timeout=10,
             )
             log.info(f"EC2 완료 신호 전송: {msg}")
         except Exception as e:
             log.warning(f"완료 신호 전송 실패: {e}")
+
+    def notify_startup(self) -> None:
+        """감시 모드 시작을 EC2에 알립니다 (Telegram 알림 트리거)."""
+        try:
+            self._session.post(f"{self.base_url}/api/notify/startup", timeout=5)
+            log.info("EC2 시작 알림 전송")
+        except Exception as e:
+            log.warning(f"시작 알림 전송 실패: {e}")
 
     def poll_run_request(self) -> bool:
         """대시보드에서 실행 요청이 왔는지 확인 (감시 모드용).
@@ -433,6 +446,7 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
 
     log.info(f"수집 대상: {len(tasks)}건")
     success = 0
+    ingested_videos: list[dict[str, Any]] = []
 
     for task in tasks:
         video_id = task["video_id"]
@@ -454,22 +468,27 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
 
         # EC2로 전송 (EC2에서 임베딩)
         payload: dict[str, Any] = {
-            "video_id":       video_id,
-            "source_type":    task["source_type"],
-            "title":          task.get("title"),
-            "url":            task.get("url"),
-            "published_at":   task.get("published_at"),
-            "duration_sec":   task.get("duration_sec"),
-            "language":       tr["language"],
+            "video_id":        video_id,
+            "source_type":     task["source_type"],
+            "title":           task.get("title"),
+            "url":             task.get("url"),
+            "published_at":    task.get("published_at"),
+            "duration_sec":    task.get("duration_sec"),
+            "language":        tr["language"],
             "transcript_text": tr["text"],
         }
         if client.send_transcript(payload):
             success += 1
+            ingested_videos.append({
+                "video_id": video_id,
+                "title":    task.get("title"),
+                "url":      task.get("url") or f"https://www.youtube.com/watch?v={video_id}",
+            })
 
     log.info(f"완료: {success}/{len(tasks)}건 전송")
     if success > 0:
         client.trigger_process()
-    client.notify_done(success, len(tasks))
+    client.notify_done(success, len(tasks), ingested_videos)
 
 
 # ------------------------------------------------------------------ #
@@ -479,6 +498,7 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
 def watch_mode(client: EC2Client, cfg: dict[str, Any], poll_interval: int = 60) -> None:
     log.info(f"감시 모드 시작 (EC2 폴링 간격: {poll_interval}초) — Ctrl+C로 종료")
     log.info(f"EC2: {cfg.get('ec2_url')}")
+    client.notify_startup()  # Telegram 알림: 수집 머신 시작
     next_midnight_run = _next_midnight_kst()
     log.info(f"다음 자정 자동 실행: {next_midnight_run.strftime('%Y-%m-%d %H:%M:%S KST')}")
     tick = 0

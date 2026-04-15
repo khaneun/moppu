@@ -1,29 +1,32 @@
 """Telegram control surface.
 
 Commands:
-- /start        — 봇 상태 확인 및 커맨드 목록
+- /help         — 전체 커맨드 목록
+- /start        — 시작 (= /help)
 - /status       — 채널·영상·임베딩 현황
-- /dashboard    — 대시보드 접속 URL (IP 조회)
-- /run          — 파이프라인 수동 실행 (영상 수집 + 요약)
+- /dashboard    — 대시보드 링크 (클릭 가능)
+- /appstatus    — EC2 서비스 실행 상태
+- /run          — 파이프라인 수동 실행
 - /summary      — 오늘의 영상 요약
-- /ask <msg>    — 에이전트에게 질문 (채팅 모드)
-- /model        — 현재 LLM 모델 확인
-- /mode         — KIS 투자 모드 확인
+- /ask <msg>    — 에이전트에게 질문
+- /model        — 현재 LLM 모델
+- /mode         — KIS 투자 모드
 - /dryrun on|off— dry_run 토글
 - /emergency    — 긴급 중단
 - /resume       — 긴급 중단 해제
 - /poll         — 채널 RSS 폴링 1회
 - /backfill <ch>— 채널 백필
-- /ingestlist [name] — 영상 목록 수집
+- /ingestlist   — 영상 목록 수집
 """
 
 from __future__ import annotations
 
+import subprocess
 from functools import wraps
 from typing import Any, Awaitable, Callable
 
 import httpx
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
 from moppu.agent.trader_agent import TraderAgent
@@ -33,15 +36,16 @@ from moppu.pipeline import Pipeline
 
 log = get_logger(__name__)
 
-_HELP = """📊 *Moppu Bot 커맨드 목록*
+_HELP = """📊 *Moppu Bot 커맨드*
 
-*현황*
-/status — 채널·영상 현황
-/dashboard — 대시보드 URL
+*현황 조회*
+/status — 채널·영상·임베딩 현황
+/dashboard — 대시보드 접속 링크
+/appstatus — EC2 서비스 실행 상태
 /model — 현재 LLM 모델
 /mode — KIS 투자 모드
 
-*수집*
+*수집 제어*
 /run — 파이프라인 즉시 실행
 /summary — 오늘의 영상 요약
 /poll — RSS 폴링 1회
@@ -49,11 +53,11 @@ _HELP = """📊 *Moppu Bot 커맨드 목록*
 /backfill <채널ID\\|all> — 초회 백필
 
 *에이전트*
-/ask <질문> — 에이전트 질문
+/ask <질문> — 애널리스트에게 질문
 
-*제어*
+*시스템 제어*
 /dryrun on\\|off — 실주문 토글
-/emergency — 긴급 중단
+/emergency — 긴급 중단 \\(dry\\_run=ON\\)
 /resume — 긴급 중단 해제
 """
 
@@ -73,7 +77,6 @@ def _guard(allowed_ids: set[int]):
 
 
 def _get_public_ip() -> str:
-    """EC2 메타데이터에서 퍼블릭 IP를 가져옵니다."""
     for url in [
         "http://169.254.169.254/latest/meta-data/public-ipv4",
         "https://api.ipify.org",
@@ -85,6 +88,29 @@ def _get_public_ip() -> str:
         except Exception:
             continue
     return "IP 조회 실패"
+
+
+def send_telegram_message(settings: Settings, text: str, parse_mode: str = "Markdown") -> None:
+    """봇 프로세스 밖에서도 텔레그램 메시지를 전송합니다 (API 직접 호출)."""
+    if not settings.telegram_bot_token:
+        return
+    chat_ids = settings.allowed_chat_ids
+    if not chat_ids:
+        return
+    for chat_id in chat_ids:
+        try:
+            httpx.post(
+                f"https://api.telegram.org/bot{settings.telegram_bot_token}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": parse_mode,
+                    "disable_web_page_preview": True,
+                },
+                timeout=5,
+            )
+        except Exception as e:
+            log.warning("telegram.send_failed", chat_id=chat_id, err=str(e))
 
 
 class TelegramBot:
@@ -108,9 +134,11 @@ class TelegramBot:
     def _register(self) -> None:
         g = _guard(self._allowed)
         handlers = [
-            ("start",       TelegramBot._cmd_start),
+            ("start",       TelegramBot._cmd_help),
+            ("help",        TelegramBot._cmd_help),
             ("status",      TelegramBot._cmd_status),
             ("dashboard",   TelegramBot._cmd_dashboard),
+            ("appstatus",   TelegramBot._cmd_appstatus),
             ("run",         TelegramBot._cmd_run),
             ("summary",     TelegramBot._cmd_summary),
             ("ask",         TelegramBot._cmd_ask),
@@ -134,57 +162,76 @@ class TelegramBot:
     # Handlers                                                            #
     # ------------------------------------------------------------------ #
 
-    async def _cmd_start(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_help(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(_HELP, parse_mode="MarkdownV2")
 
     async def _cmd_status(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         from moppu.storage.db import Channel, Video
         with self._pipeline._sf() as s:  # noqa: SLF001
-            n_ch = s.query(Channel).filter_by(enabled=True).count()
-            n_vid = s.query(Video).count()
-            n_emb = s.query(Video).filter(Video.status == "embedded").count()
+            n_ch   = s.query(Channel).filter_by(enabled=True).count()
+            n_vid  = s.query(Video).count()
+            n_emb  = s.query(Video).filter(Video.status == "embedded").count()
             n_fail = s.query(Video).filter(Video.status == "failed").count()
         mode = self._settings.kis_env
-        dry = self._agent._cfg.dry_run  # noqa: SLF001
-        text = (
+        dry  = self._agent._cfg.dry_run  # noqa: SLF001
+        await update.message.reply_text(
             f"📊 *현황*\n"
             f"채널: {n_ch}개 활성\n"
             f"영상: {n_vid}개 (임베딩 {n_emb} / 실패 {n_fail})\n"
             f"투자모드: {'실전' if mode == 'real' else '모의'}\n"
-            f"Dry Run: {'ON' if dry else 'OFF'}"
-        )
-        await update.message.reply_text(text, parse_mode="Markdown")
-
-    async def _cmd_dashboard(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-        ip = _get_public_ip()
-        await update.message.reply_text(
-            f"🖥 *Moppu Monitor*\n`http://{ip}:8000`",
+            f"Dry Run: {'ON' if dry else 'OFF'}",
             parse_mode="Markdown",
         )
+
+    async def _cmd_dashboard(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        ip  = _get_public_ip()
+        url = f"http://{ip}:8000"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🖥 대시보드 열기", url=url)]])
+        await update.message.reply_text(
+            f"*Moppu Monitor*\n`{url}`",
+            reply_markup=keyboard,
+            parse_mode="Markdown",
+        )
+
+    async def _cmd_appstatus(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        services = ["moppu-dashboard", "moppu-scheduler", "moppu-bot"]
+        lines = ["*서비스 상태*"]
+        for svc in services:
+            try:
+                r = subprocess.run(
+                    ["systemctl", "is-active", svc],
+                    capture_output=True, text=True, timeout=3,
+                )
+                st = r.stdout.strip()
+            except Exception:
+                st = "unknown"
+            icon = "🟢" if st == "active" else "🔴"
+            lines.append(f"{icon} `{svc}`: {st}")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
     async def _cmd_run(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text("⚙️ 파이프라인 실행 중...")
         try:
             self._pipeline.sync_video_lists()
             n = self._pipeline.ingest_from_lists()
-            from moppu.agent.daily_summary import generate_and_save
-            from moppu.config import Settings as _S
-            from pathlib import Path as _P
             cfg = self._pipeline._cfg  # noqa: SLF001
             if n > 0:
+                from moppu.agent.daily_summary import generate_and_save
                 generate_and_save(
-                    self._pipeline._sf,  # noqa: SLF001
-                    self._agent._llm,    # noqa: SLF001
+                    self._pipeline._sf,   # noqa: SLF001
+                    self._agent._llm,     # noqa: SLF001
                     cfg.app.data_dir,
                     force=True,
                 )
-            await update.message.reply_text(f"✅ 완료: {n}건 수집" + (" + 요약 생성" if n > 0 else ""))
+            await update.message.reply_text(
+                f"✅ 완료: {n}건 수집" + (" + 요약 생성" if n > 0 else "")
+            )
         except Exception as e:
             await update.message.reply_text(f"❌ 오류: {e}")
 
     async def _cmd_summary(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
-        from moppu.agent.daily_summary import load
         from datetime import datetime, timedelta, timezone
+        from moppu.agent.daily_summary import load
         KST = timezone(timedelta(hours=9))
         today_str = datetime.now(KST).strftime("%Y-%m-%d")
         saved = load(self._pipeline._cfg.app.data_dir, today_str)  # noqa: SLF001
@@ -198,13 +245,16 @@ class TelegramBot:
 
     async def _cmd_model(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         llm = self._agent._llm  # noqa: SLF001
-        await update.message.reply_text(f"🤖 현재 LLM: `{llm.name}` / `{llm.model}`", parse_mode="Markdown")
+        await update.message.reply_text(
+            f"🤖 현재 LLM: `{llm.name}` / `{llm.model}`", parse_mode="Markdown"
+        )
 
     async def _cmd_mode(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
         mode = self._settings.kis_env
-        dry = self._agent._cfg.dry_run  # noqa: SLF001
+        dry  = self._agent._cfg.dry_run  # noqa: SLF001
         await update.message.reply_text(
-            f"💰 투자 모드: *{'실전' if mode == 'real' else '모의'}*\nDry Run: *{'ON' if dry else 'OFF'}*",
+            f"💰 투자 모드: *{'실전' if mode == 'real' else '모의'}*\n"
+            f"Dry Run: *{'ON' if dry else 'OFF'}*",
             parse_mode="Markdown",
         )
 
@@ -241,9 +291,12 @@ class TelegramBot:
             reply = text
             if citations:
                 reply += "\n\n📎 " + " / ".join(
-                    f"[{c.get('title', c['video_id'])[:20]}]({c['url']})" for c in citations[:3]
+                    f"[{c.get('title', c['video_id'])[:20]}]({c['url']})"
+                    for c in citations[:3]
                 )
-            await update.message.reply_text(reply, parse_mode="Markdown", disable_web_page_preview=True)
+            await update.message.reply_text(
+                reply, parse_mode="Markdown", disable_web_page_preview=True
+            )
         except Exception as e:
             await update.message.reply_text(f"❌ 오류: {e}")
 
