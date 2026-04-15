@@ -102,6 +102,24 @@ class EC2Client:
         except Exception as e:
             log.warning(f"처리 트리거 실패: {e}")
 
+    def notify_done(self, success: int, total: int) -> None:
+        """수집 완료 결과를 EC2에 알립니다."""
+        if total == 0:
+            msg = "수집할 항목 없음"
+        elif success == 0:
+            msg = f"수집 완료 (0/{total}건 — 모두 실패 또는 스킵)"
+        else:
+            msg = f"수집 완료 ({success}/{total}건 임베딩)"
+        try:
+            self._session.post(
+                f"{self.base_url}/api/collect/done",
+                json={"success": success, "total": total, "message": msg},
+                timeout=5,
+            )
+            log.info(f"EC2 완료 신호 전송: {msg}")
+        except Exception as e:
+            log.warning(f"완료 신호 전송 실패: {e}")
+
     def poll_run_request(self) -> bool:
         """대시보드에서 실행 요청이 왔는지 확인 (감시 모드용).
 
@@ -403,6 +421,7 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
 
     if not tasks:
         log.info("수집할 항목 없음")
+        client.notify_done(0, 0)
         return
 
     log.info(f"수집 대상: {len(tasks)}건")
@@ -443,6 +462,7 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
     log.info(f"완료: {success}/{len(tasks)}건 전송")
     if success > 0:
         client.trigger_process()
+    client.notify_done(success, len(tasks))
 
 
 # ------------------------------------------------------------------ #

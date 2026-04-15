@@ -960,6 +960,21 @@ def receive_transcript(req: TranscriptReceiveRequest):
     return {"ok": True, "skipped": False, "video_id": req.video_id, "chunks": len(chunks)}
 
 
+class CollectDoneRequest(BaseModel):
+    success: int = 0
+    total: int = 0
+    message: str = "완료"
+
+
+@app.post("/api/collect/done")
+def collect_done(req: CollectDoneRequest):
+    """로컬 수집기가 작업 완료 후 호출 — EC2 상태 메시지 업데이트."""
+    global _pipeline_run_msg
+    _pipeline_run_msg = req.message
+    _write_pipeline_log(f"[LOCAL 완료] {req.message}")
+    return {"ok": True}
+
+
 @app.post("/api/collect/request-run")
 def request_local_run():
     """대시보드 → 로컬 수집기 실행 요청 (로컬이 폴링해서 감지)."""
