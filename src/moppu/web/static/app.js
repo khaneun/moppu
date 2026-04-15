@@ -370,20 +370,30 @@ async function loadPipeline() {
     const runStatusEl = document.getElementById('pipeline-run-status');
     const runMsgEl    = document.getElementById('pipeline-run-msg');
     if (data.pipeline_running) {
+      // EC2 직접 실행 중
       runStatusEl.style.display = 'flex';
       runStatusEl.className = 'run-status';
       runMsgEl.innerHTML = `<div class="spinner" style="display:inline-block;margin-right:6px;"></div>${escHtml(data.pipeline_run_msg || '실행 중...')}`;
       if (!_pipelinePolling) _pipelinePolling = setInterval(loadPipeline, 2000);
+    } else if (data.pipeline_run_msg) {
+      const isWaiting = data.pipeline_run_msg.includes('대기 중');
+      const isErr     = data.pipeline_run_msg.startsWith('오류');
+      runStatusEl.style.display = 'flex';
+      runStatusEl.className = 'run-status ' + (isErr ? 'error' : (isWaiting ? '' : 'done'));
+      runMsgEl.innerHTML = isWaiting
+        ? `<div class="spinner" style="display:inline-block;margin-right:6px;"></div>${escHtml(data.pipeline_run_msg)}`
+        : escHtml(data.pipeline_run_msg);
+
+      if (isWaiting) {
+        // 로컬 수집기 완료 신호 대기 — 5초마다 계속 폴링
+        if (!_pipelinePolling) _pipelinePolling = setInterval(loadPipeline, 5000);
+      } else {
+        // 완료 신호 수신됨 — 폴링 중단
+        if (_pipelinePolling) { clearInterval(_pipelinePolling); _pipelinePolling = null; }
+      }
     } else {
       if (_pipelinePolling) { clearInterval(_pipelinePolling); _pipelinePolling = null; }
-      // 실행 완료 후: pipeline.log 최신 줄로 상태 업데이트
-      if (data.pipeline_run_msg) {
-        const isErr = data.pipeline_run_msg.startsWith('오류');
-        runStatusEl.style.display = 'flex';
-        runStatusEl.className = 'run-status ' + (isErr ? 'error' : 'done');
-        // 최신 로그 줄도 함께 보여주기 (로컬 수집 진행 반영)
-        _updateStatusFromLog(runMsgEl, data.pipeline_run_msg);
-      }
+      runStatusEl.style.display = 'none';
     }
 
     // 채널 서브카드
