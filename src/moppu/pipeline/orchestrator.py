@@ -65,24 +65,14 @@ class Pipeline:
         return None
 
     def _passes_filter(self, info: VideoInfo, spec: ChannelSpec) -> bool:
-        """Return False if info should be skipped according to spec filters."""
+        """Return False if info should be skipped (title_contains filter)."""
         if spec.title_contains is not None:
-            title = info.title or ""
-            if spec.title_contains not in title:
+            if spec.title_contains not in (info.title or ""):
                 log.info(
                     "ingest.skipped.title_filter",
                     video_id=info.video_id,
-                    title=title,
+                    title=info.title,
                     filter=spec.title_contains,
-                )
-                return False
-        if spec.upload_day is not None:
-            if info.published_at is None or info.published_at.day != spec.upload_day:
-                log.info(
-                    "ingest.skipped.upload_day_filter",
-                    video_id=info.video_id,
-                    published_at=info.published_at,
-                    required_day=spec.upload_day,
                 )
                 return False
         return True
@@ -160,30 +150,16 @@ class Pipeline:
         return processed
 
     def poll_upload_day_channels(self) -> int:
-        """Midnight job: poll channels whose upload_day matches yesterday's date.
+        """Midnight job: poll ALL enabled channels for recently uploaded videos.
 
-        Intended to run via the ``upload_day_cron`` scheduler job at 00:00 each
-        day. Finds channels configured with ``upload_day == yesterday.day``,
-        polls their RSS feeds, and ingests videos that also pass ``title_contains``.
+        Runs at 00:00 each day. Polls every enabled channel's RSS feed and
+        ingests new videos that pass the ``title_contains`` filter (if set).
         """
-        yesterday_day = (datetime.now(timezone.utc) - timedelta(days=1)).day
-
-        target_ids = {
-            s.channel_id
-            for s in self._channels_cfg.channels
-            if s.upload_day == yesterday_day and s.enabled and s.channel_id
-        }
-        if not target_ids:
-            log.info("upload_day.no_channels", yesterday_day=yesterday_day)
-            return 0
-
-        log.info("upload_day.start", yesterday_day=yesterday_day, channels=list(target_ids))
-
         with self._sf() as session:
             channel_ids = [
                 c.channel_id
                 for c in session.query(Channel).filter_by(enabled=True).all()
-                if c.channel_id in target_ids
+                if c.channel_id
             ]
 
         batch = self._cfg.ingestion.batch_size
@@ -199,7 +175,7 @@ class Pipeline:
             if processed >= batch:
                 break
 
-        log.info("upload_day.done", yesterday_day=yesterday_day, ingested=processed)
+        log.info("upload_day.done", channels=len(channel_ids), ingested=processed)
         return processed
 
     def handle_push_event(self, event: NewVideoEvent) -> bool:

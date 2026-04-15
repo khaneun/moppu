@@ -206,9 +206,8 @@ class ChannelSpec(BaseModel):
     name: str | None = None
     tags: list[str] = Field(default_factory=list)
     enabled: bool = True
-    # Ingestion filters — both are optional; omit to collect everything.
-    title_contains: str | None = None  # only ingest if video title contains this string
-    upload_day: int | None = None       # only ingest videos published on this day-of-month (1–31)
+    # Ingestion filter — only ingest if video title contains this string
+    title_contains: str | None = None
 
     @field_validator("handle")
     @classmethod

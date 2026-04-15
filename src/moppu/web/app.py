@@ -289,7 +289,7 @@ def app_log():
     # 1) journald 시도 (EC2 systemd 환경)
     try:
         result = subprocess.run(
-            ["journalctl", "-u", "moppu-dashboard", "--no-pager", "-n", "300",
+            ["journalctl", "-u", "moppu-dashboard", "--no-pager", "-n", "500",
              "--output=short-iso", "--no-hostname"],
             capture_output=True, text=True, timeout=5,
         )
@@ -304,7 +304,7 @@ def app_log():
         path = _rt.cfg.app.data_dir / "app.log"
         if path.exists():
             lines = path.read_text(encoding="utf-8").splitlines()
-            return {"lines": lines[-300:], "source": "file"}
+            return {"lines": lines[-500:], "source": "file"}
 
     return {"lines": ["로그를 찾을 수 없습니다."], "source": "none"}
 
@@ -318,7 +318,7 @@ def pipeline_log():
         return {"lines": [], "exists": False}
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
-        return {"lines": lines[-200:], "exists": True, "total": len(lines)}
+        return {"lines": lines[-500:], "exists": True, "total": len(lines)}
     except Exception as e:
         return {"lines": [f"[ERROR] 로그 파일 읽기 실패: {e}"], "exists": True}
 
@@ -838,7 +838,6 @@ def collect_items():
             "handle": ch.handle,
             "name": ch.name,
             "title_contains": spec.title_contains if spec else None,
-            "upload_day": spec.upload_day if spec else None,
         })
 
     return {
@@ -1003,7 +1002,11 @@ def trigger_local_process():
         from moppu.agent.daily_summary import generate_and_save
         try:
             _write_pipeline_log("[LOCAL] 요약 생성 시작...")
-            generate_and_save(_rt.session_factory, _rt.llm, _rt.cfg.app.data_dir, force=True)
+            result = generate_and_save(_rt.session_factory, _rt.llm, _rt.cfg.app.data_dir, force=True)
+            if result:
+                usage = result.get("usage") or {}
+                if usage.get("input_tokens"):
+                    _log_token_usage(_rt.cfg.llm.provider, _rt.cfg.llm.model, usage)
             _write_pipeline_log("[LOCAL] 요약 생성 완료")
         except Exception as e:
             _write_pipeline_log(f"[LOCAL][ERROR] 요약 실패: {e}")

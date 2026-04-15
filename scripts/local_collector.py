@@ -388,16 +388,13 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
             "url":         item.get("source_url"),
         })
 
-    # 2) 채널 항목 — upload_day 기준 필터링
-    yesterday_day = (datetime.now(KST) - timedelta(days=1)).day
-    for ch in channel_items:
-        upload_day = ch.get("upload_day")
-        if upload_day and upload_day != yesterday_day:
-            continue
+    # 2) 채널 항목 — 전일(KST) 업로드 영상 + title_contains 필터
+    yesterday_kst = (datetime.now(KST) - timedelta(days=1)).date()
 
+    for ch in channel_items:
         channel_id   = ch["channel_id"]
         title_filter = ch.get("title_contains")
-        log.info(f"채널 폴링: {ch.get('name', channel_id)}")
+        log.info(f"채널 폴링: {ch.get('name', channel_id)} (전일: {yesterday_kst})")
 
         try:
             if youtube_api_key:
@@ -409,8 +406,18 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
             continue
 
         for v in videos:
+            # 제목 필터
             if title_filter and title_filter not in (v.get("title") or ""):
                 continue
+            # 전일 업로드 날짜 필터
+            pub_str = v.get("published_at")
+            if pub_str:
+                try:
+                    pub_dt = datetime.fromisoformat(pub_str.replace("Z", "+00:00"))
+                    if pub_dt.astimezone(KST).date() != yesterday_kst:
+                        continue
+                except Exception:
+                    pass  # 파싱 실패 시 포함
             tasks.append({
                 "video_id":    v["video_id"],
                 "source_type": channel_id,

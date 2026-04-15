@@ -552,7 +552,6 @@ async function _renderChannelModal() {
           <div class="form-group"><label>핸들 (@handle)</label><input type="text" id="new-ch-handle" placeholder="@someinvestor"></div>
           <div class="form-group"><label>이름</label><input type="text" id="new-ch-name" placeholder="채널 이름"></div>
           <div class="form-group"><label>제목 필터 (title_contains)</label><input type="text" id="new-ch-filter" placeholder="이선엽"></div>
-          <div class="form-group"><label>업로드 일 (upload_day, 1-31)</label><input type="number" id="new-ch-day" min="1" max="31" placeholder="12" style="background:var(--bg-2);border:1px solid var(--border-2);color:var(--text);padding:8px 10px;border-radius:6px;width:100%;"></div>
         </div>
         <p id="ch-add-status" class="text-muted" style="margin-top:6px;"></p>
         <button id="btn-add-ch" class="btn btn-primary" style="margin-top:8px;">추가</button>
@@ -597,7 +596,6 @@ async function _renderChannelModal() {
       const handle = document.getElementById('new-ch-handle').value.trim();
       const name = document.getElementById('new-ch-name').value.trim();
       const filter = document.getElementById('new-ch-filter').value.trim();
-      const day = document.getElementById('new-ch-day').value;
       const statusEl = document.getElementById('ch-add-status');
       if (!chId && !handle) { statusEl.textContent = 'Channel ID 또는 핸들을 입력하세요.'; return; }
       statusEl.textContent = '추가 중...';
@@ -607,7 +605,6 @@ async function _renderChannelModal() {
           handle: handle || null,
           name: name || null,
           title_contains: filter || null,
-          upload_day: day ? parseInt(day) : null,
           enabled: true,
         });
         statusEl.textContent = `✓ 추가됨: ${r.channel_id}`;
@@ -787,10 +784,11 @@ async function loadCost() {
     const tbody = document.getElementById('cost-body');
     tbody.innerHTML = data.recent_entries && data.recent_entries.length
       ? data.recent_entries.slice().reverse().map(e => {
+          if (!e || !e.ts) return '';
           const t = new Date(e.ts).toLocaleString('ko-KR', { hour: '2-digit', minute: '2-digit' });
           return `<tr><td>${t}</td><td>${e.provider}/${trunc(e.model, 15)}</td><td>${e.input_tokens.toLocaleString()}</td><td>${e.output_tokens.toLocaleString()}</td><td>${usd(e.cost_usd)}</td></tr>`;
         }).join('')
-      : '<tr><td colspan="5" class="text-muted">사용 내역 없음</td></tr>';
+      : '<tr><td colspan="5" class="text-muted">아직 LLM 호출 내역이 없습니다. Agent 대화 또는 요약 생성 후 표시됩니다.</td></tr>';
   } catch (e) { if (e.message !== '인증 필요') console.error('loadCost', e); }
 }
 
