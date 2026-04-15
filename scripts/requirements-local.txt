@@ -1,0 +1,7 @@
+# Moppu Local Collector 의존 패키지
+# pip install -r requirements-local.txt
+
+requests>=2.31
+youtube-transcript-api>=1.2
+yt-dlp>=2024.8
+feedparser>=6.0

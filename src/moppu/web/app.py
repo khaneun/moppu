@@ -793,9 +793,7 @@ def delete_video_entry(list_name: str, video_id: str):
         entry = s.query(VideoListEntry).filter_by(list_name=list_name, video_id=video_id).one_or_none()
         if entry is None:
             raise HTTPException(404, "항목을 찾을 수 없습니다.")
-        # Chroma 임베딩 삭제
         n_emb = _delete_video_embeddings(s, [video_id])
-        # Video 레코드도 삭제 (연관 transcript/chunk cascade)
         v = s.query(Video).filter_by(video_id=video_id).one_or_none()
         if v:
             s.delete(v)
@@ -803,3 +801,185 @@ def delete_video_entry(list_name: str, video_id: str):
         s.commit()
     _deleted_embedding_count += n_emb
     return {"ok": True, "deleted_embeddings": n_emb}
+
+
+# -------------------------------------------------------------------- #
+# Local Collector API  (로컬 PC → EC2 자막 전송)                        #
+# -------------------------------------------------------------------- #
+
+
+@app.get("/api/collect/items")
+def collect_items():
+    """로컬 수집기가 수집해야 할 항목 목록 반환 (미완료 항목만)."""
+    assert _rt is not None
+
+    enabled_lists = {vl.name for vl in _rt.channels_cfg.video_lists if vl.enabled}
+    with _rt.session_factory() as s:
+        entries = (
+            s.query(VideoListEntry)
+            .filter(VideoListEntry.list_name.in_(enabled_lists))
+            .all()
+        )
+        pending_list = []
+        for e in entries:
+            v = s.query(Video).filter_by(video_id=e.video_id).one_or_none()
+            if v and v.status in {"embedded", "transcribed"}:
+                continue
+            pending_list.append({
+                "video_id": e.video_id,
+                "list_name": e.list_name,
+                "source_url": e.source_url,
+            })
+
+        enabled_chs = s.query(Channel).filter_by(enabled=True).all()
+
+    channel_items = []
+    for ch in enabled_chs:
+        spec = next(
+            (sp for sp in _rt.channels_cfg.channels if sp.channel_id == ch.channel_id),
+            None,
+        )
+        channel_items.append({
+            "channel_id": ch.channel_id,
+            "handle": ch.handle,
+            "name": ch.name,
+            "title_contains": spec.title_contains if spec else None,
+            "upload_day": spec.upload_day if spec else None,
+        })
+
+    return {
+        "video_list_items": pending_list,
+        "channel_items": channel_items,
+        "preferred_languages": _rt.cfg.ingestion.transcript_languages,
+    }
+
+
+class TranscriptReceiveRequest(BaseModel):
+    video_id: str
+    source_type: str
+    title: str | None = None
+    url: str | None = None
+    published_at: str | None = None
+    duration_sec: int | None = None
+    language: str = "ko"
+    transcript_text: str
+
+
+@app.post("/api/collect/transcript")
+def receive_transcript(req: TranscriptReceiveRequest):
+    """로컬에서 수집한 자막을 받아 EC2에서 임베딩·저장합니다."""
+    assert _rt is not None
+    import uuid as _uuid
+    from moppu.ingestion.transcript import chunk_text
+    from moppu.storage.db import Transcript as TrModel, TranscriptChunk
+
+    pub_at = None
+    if req.published_at:
+        try:
+            pub_at = datetime.fromisoformat(req.published_at.replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            pass
+
+    with _rt.session_factory() as s:
+        is_list = req.source_type.startswith("list:")
+        channel_fk = None
+        if not is_list:
+            ch = s.query(Channel).filter_by(channel_id=req.source_type).one_or_none()
+            if ch:
+                channel_fk = ch.id
+
+        video = s.query(Video).filter_by(video_id=req.video_id).one_or_none()
+        if video and video.status == "embedded":
+            return {"ok": True, "skipped": True, "reason": "already embedded"}
+
+        if not video:
+            video = Video(
+                video_id=req.video_id,
+                channel_fk=channel_fk,
+                source_type=req.source_type,
+                title=req.title,
+                published_at=pub_at,
+                url=req.url,
+                duration_sec=req.duration_sec,
+                created_at=datetime.utcnow(),
+                status="pending",
+            )
+            s.add(video)
+            s.flush()
+        else:
+            if req.title:
+                video.title = req.title
+            if pub_at:
+                video.published_at = pub_at
+
+        video_pk = video.id
+
+        old_tr = s.query(TrModel).filter_by(video_fk=video_pk).one_or_none()
+        if old_tr:
+            old_eids = [c.embedding_id for c in old_tr.chunks if c.embedding_id]
+            if old_eids:
+                _rt.vector_store.delete(old_eids)
+            s.delete(old_tr)
+            s.flush()
+
+        transcript = TrModel(
+            video_fk=video_pk,
+            language=req.language,
+            source="local_collector",
+            text=req.transcript_text,
+        )
+        s.add(transcript)
+        s.flush()
+
+        chunks = chunk_text(
+            req.transcript_text,
+            _rt.cfg.embeddings.chunk_size,
+            _rt.cfg.embeddings.chunk_overlap,
+        )
+        if not chunks:
+            s.query(Video).filter_by(id=video_pk).update({"status": "failed", "error": "empty transcript"})
+            s.commit()
+            return {"ok": False, "reason": "empty transcript after chunking"}
+
+        vectors = _rt.embedder.embed(chunks)
+        ids = [f"{req.video_id}:{i}:{_uuid.uuid4().hex[:8]}" for i in range(len(chunks))]
+        metadatas = [
+            {
+                "video_id": req.video_id,
+                "source": req.source_type,
+                "chunk_index": i,
+                "published_at": pub_at.isoformat() if pub_at else None,
+                "title": req.title or "",
+            }
+            for i in range(len(chunks))
+        ]
+
+        for i, (txt, eid) in enumerate(zip(chunks, ids)):
+            s.add(TranscriptChunk(transcript_fk=transcript.id, chunk_index=i, text=txt, embedding_id=eid))
+
+        s.query(Video).filter_by(id=video_pk).update({"status": "embedded", "error": None})
+        s.commit()
+
+    _rt.vector_store.upsert(ids=ids, embeddings=vectors, documents=chunks, metadatas=metadatas)
+    log.info("collect.transcript_received", video_id=req.video_id, chunks=len(chunks))
+    _write_pipeline_log(f"[LOCAL] 수신·임베딩: {req.video_id} ({len(chunks)}청크, {req.language})")
+    return {"ok": True, "skipped": False, "video_id": req.video_id, "chunks": len(chunks)}
+
+
+@app.post("/api/collect/process")
+def trigger_local_process():
+    """로컬 수집 완료 후 요약 + 추천 질문 생성 트리거 (백그라운드)."""
+    assert _rt is not None
+
+    def _do() -> None:
+        from moppu.agent.daily_summary import generate_and_save
+        try:
+            _write_pipeline_log("[LOCAL] 요약 생성 시작...")
+            generate_and_save(_rt.session_factory, _rt.llm, _rt.cfg.app.data_dir, force=True)
+            _write_pipeline_log("[LOCAL] 요약 생성 완료")
+        except Exception as e:
+            _write_pipeline_log(f"[LOCAL][ERROR] 요약 실패: {e}")
+            log.error("collect.process_failed", err=str(e))
+
+    threading.Thread(target=_do, daemon=True).start()
+    return {"ok": True, "message": "요약 생성 시작됨 (백그라운드)"}
