@@ -1,0 +1,17 @@
+[Unit]
+Description=Moppu Scheduler (APScheduler)
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/moppu
+ExecStart=/opt/moppu/.venv/bin/moppu scheduler
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=moppu-scheduler
+
+[Install]
+WantedBy=multi-user.target

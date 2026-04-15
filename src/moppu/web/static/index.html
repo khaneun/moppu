@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Moppu Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+  <!-- ===== Login Overlay ===== -->
+  <div id="login-overlay" class="login-overlay">
+    <div class="login-box">
+      <img src="/static/moppu.png" alt="Moppu" class="login-logo">
+      <h2>Moppu Monitor</h2>
+      <div class="form-group"><input type="text" id="login-id" placeholder="아이디" autocomplete="username"></div>
+      <div class="form-group"><input type="password" id="login-pw" placeholder="비밀번호" autocomplete="current-password"></div>
+      <button id="btn-login" class="btn btn-primary" style="width:100%;">로그인</button>
+      <p id="login-error" class="text-warn" style="margin-top:8px;text-align:center;"></p>
+    </div>
+  </div>
+
+  <header>
+    <div class="header-left">
+      <img src="/static/moppu.png" alt="Moppu" class="profile-img">
+      <h1>Moppu Monitor</h1>
+    </div>
+    <div class="header-right">
+      <span id="status-badge" class="badge badge-ok">정상 운영</span>
+      <span id="header-mode" class="badge badge-mode">모의투자</span>
+    </div>
+  </header>
+
+  <nav>
+    <button class="tab active" data-tab="overview">종합 현황</button>
+    <button class="tab" data-tab="agent">Agent</button>
+    <button class="tab" data-tab="settings">설정</button>
+  </nav>
+
+  <main>
+    <!-- ========== 종합 현황 ========== -->
+    <section id="tab-overview" class="tab-panel active">
+      <div class="grid-2">
+        <div class="card">
+          <h3>자산 현황</h3>
+          <div class="stat-grid">
+            <div class="stat"><span class="stat-label">예수금</span><span class="stat-value" id="cash-balance">-</span></div>
+            <div class="stat"><span class="stat-label">총 평가금액</span><span class="stat-value" id="total-asset">-</span></div>
+            <div class="stat"><span class="stat-label">투자 모드</span><span class="stat-value" id="ov-kis-mode">-</span></div>
+            <div class="stat"><span class="stat-label">Dry Run</span><span class="stat-value" id="ov-dry-run">-</span></div>
+          </div>
+          <p id="broker-error" class="text-warn" style="display:none;margin-top:8px;"></p>
+        </div>
+
+        <div class="card">
+          <h3>수집 요약</h3>
+          <div id="ingestion-summary-label" class="summary-label-clickable">
+            <p class="text-muted">로딩 중...</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>보유 종목</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>종목코드</th><th>수량</th><th>매입평균가</th><th>평가금액</th><th>평가손익</th><th>수익률</th></tr></thead>
+            <tbody id="positions-body"><tr><td colspan="6" class="text-muted">로딩 중...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== Agent ========== -->
+    <section id="tab-agent" class="tab-panel">
+      <div class="grid-agent">
+        <div class="card chat-card">
+          <div class="chat-header">
+            <h3>LSY Agent와의 대화</h3>
+            <button id="btn-view-prompt" class="btn btn-secondary btn-sm">프롬프트 보기</button>
+          </div>
+          <div id="suggested-questions" class="suggested-qs"></div>
+          <div id="chat-messages" class="messages"></div>
+          <form id="chat-form" class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="질문을 입력하세요..." autocomplete="off">
+            <button type="submit" class="btn btn-primary" id="btn-send">전송</button>
+          </form>
+        </div>
+
+        <div class="card pipeline-card">
+          <div class="pipeline-header">
+            <h3 style="margin-bottom:0;">파이프라인 현황</h3>
+            <div style="display:flex;gap:6px;">
+              <button id="btn-pipeline-run" class="btn btn-primary btn-sm">▶ 실행</button>
+              <button id="btn-pipeline-log" class="btn btn-secondary btn-sm">로그</button>
+            </div>
+          </div>
+          <div id="pipeline-run-status" class="run-status" style="display:none;"></div>
+
+          <div class="pipeline-sub-cards">
+            <div class="sub-card">
+              <div class="sub-card-header">
+                <span class="sub-card-title">채널</span>
+                <button id="btn-edit-channels" class="btn-xs">편집</button>
+              </div>
+              <div id="sc-channels" class="sub-card-stat">-</div>
+              <div id="channel-list" class="channel-list" style="margin-top:6px;"></div>
+            </div>
+            <div class="sub-card">
+              <div class="sub-card-header">
+                <span class="sub-card-title">영상 목록</span>
+                <button id="btn-edit-lists" class="btn-xs">편집</button>
+              </div>
+              <div id="sc-videos" class="sub-card-stat">-</div>
+            </div>
+            <div class="sub-card">
+              <div class="sub-card-header">
+                <span class="sub-card-title">임베딩</span>
+              </div>
+              <div id="sc-embedding"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ========== 설정 ========== -->
+    <section id="tab-settings" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <h3>투자 모드</h3>
+          <div class="setting-row">
+            <span>현재 모드:</span>
+            <span id="set-kis-mode" class="badge badge-mode">-</span>
+          </div>
+          <div class="btn-group" style="margin-top:12px;">
+            <button class="btn btn-secondary" id="btn-paper">모의투자</button>
+            <button class="btn btn-danger" id="btn-real">실전투자</button>
+          </div>
+          <div class="setting-row" style="margin-top:16px;">
+            <span>Dry Run:</span>
+            <label class="switch">
+              <input type="checkbox" id="chk-dry-run" checked>
+              <span class="slider"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3>LLM 모델</h3>
+          <div class="form-group">
+            <label>Provider</label>
+            <select id="sel-provider">
+              <option value="openai">OpenAI</option>
+              <option value="anthropic">Anthropic</option>
+              <option value="google">Google</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Model</label>
+            <input type="text" id="inp-model" placeholder="gpt-4.1">
+          </div>
+          <button class="btn btn-primary" id="btn-apply-llm">적용</button>
+          <p id="llm-status" class="text-muted" style="margin-top:8px;"></p>
+        </div>
+
+        <div class="card">
+          <h3>시스템 제어</h3>
+          <button id="btn-emergency" class="btn btn-emergency">긴급 중단</button>
+          <button id="btn-resume" class="btn btn-ok" style="display:none;">운영 재개</button>
+          <p id="emergency-status" class="text-muted" style="margin-top:8px;"></p>
+        </div>
+
+        <div class="card">
+          <h3>요금 현황</h3>
+          <div class="stat-grid" id="cost-stats"></div>
+          <h4 style="margin-top:12px;">최근 사용 내역</h4>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>시간</th><th>모델</th><th>Input</th><th>Output</th><th>비용($)</th></tr></thead>
+              <tbody id="cost-body"><tr><td colspan="5" class="text-muted">-</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ===== Summary Modal ===== -->
+  <div id="summary-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+      <div class="modal-header">
+        <div><span class="modal-date" id="modal-date-label"></span><h3 style="margin:0;color:#e2e8f0;">수집 요약</h3></div>
+        <button class="modal-close" id="btn-modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="modal-summary-text" class="modal-summary-content"></div>
+        <div id="modal-sources" class="modal-sources"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Prompt Modal ===== -->
+  <div id="prompt-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3 style="margin:0;color:#e2e8f0;">시스템 프롬프트</h3>
+        <button class="modal-close" id="btn-prompt-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div id="prompt-modal-content" class="modal-summary-content"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Channel Edit Modal ===== -->
+  <div id="channel-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3 style="margin:0;color:#e2e8f0;">채널 편집</h3>
+        <button class="modal-close" onclick="closeModal('channel-modal')">&times;</button>
+      </div>
+      <div class="modal-body" id="channel-modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ===== Video List Edit Modal ===== -->
+  <div id="list-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3 style="margin:0;color:#e2e8f0;">영상 목록 편집</h3>
+        <button class="modal-close" onclick="closeModal('list-modal')">&times;</button>
+      </div>
+      <div class="modal-body" id="list-modal-body"></div>
+    </div>
+  </div>
+
+  <!-- ===== Pipeline Log Modal ===== -->
+  <div id="log-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <h3 style="margin:0;color:#e2e8f0;">파이프라인 실행 로그</h3>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <button id="btn-log-refresh" class="btn btn-secondary btn-sm">↻ 새로고침</button>
+          <button class="modal-close" onclick="closeModal('log-modal')">&times;</button>
+        </div>
+      </div>
+      <div class="modal-body" id="log-modal-body"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

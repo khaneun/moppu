@@ -1,0 +1,17 @@
+[Unit]
+Description=Moppu Telegram Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+WorkingDirectory=/opt/moppu
+ExecStart=/opt/moppu/.venv/bin/moppu bot
+Restart=on-failure
+RestartSec=15
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=moppu-bot
+
+[Install]
+WantedBy=multi-user.target

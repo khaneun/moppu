@@ -14,11 +14,21 @@ TraderAgent → Broker (KIS) / Telegram`. All components are constructed once in
 `src/moppu/runtime.py::build_runtime`; CLI, scheduler, and bot all go through
 that single entry point.
 
+## First-time setup
+
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
+
+cp .env.example .env                          # fill in API keys and KIS credentials
+cp config/config.example.yaml config/config.yaml
+cp config/channels.example.yaml config/channels.yaml
+```
+
 ## Common commands
 
 ```bash
-pip install -e ".[dev]"          # install with dev extras
-
+# Ingestion
 moppu sync-channels              # reconcile channels.yaml:channels → DB
 moppu backfill --channel-id UC…  # first-time ingest of all videos in a channel
 moppu poll                       # one RSS-based new-video check
@@ -26,15 +36,31 @@ moppu scheduler                  # APScheduler loop (cron from config)
 moppu sync-video-lists           # register channels.yaml:video_lists entries → DB (idempotent)
 moppu ingest-lists               # ingest all pending videos from video lists
 moppu ingest-lists --list-name semicon-highlights  # restrict to one list
+
+# Agent
 moppu ask "<question>"           # one-shot agent run, prints JSON decision
 moppu bot                        # Telegram bot (long-polling)
 
+# Dev
 pytest                           # all tests
 pytest tests/test_config.py -k resolve   # single test
 ruff check .                     # lint
 ruff format .                    # autoformat
 mypy src                         # type-check (non-strict)
 ```
+
+## Telegram bot commands
+
+| Command | Description |
+|---------|-------------|
+| `/status` | Channel and video counts |
+| `/poll` | Trigger one polling cycle |
+| `/backfill <channel_id\|all>` | Backfill a channel |
+| `/ingestlist [list_name]` | Sync + ingest a video list |
+| `/ask <question>` | Run the agent, reply with decision |
+| `/dryrun on\|off` | Toggle `agent.dry_run` at runtime |
+
+Access is gated by `TELEGRAM_ALLOWED_CHAT_IDS` — an empty allowlist admits all chats.
 
 ## Configuration model — two layers, don't mix them
 
@@ -48,6 +74,10 @@ mypy src                         # type-check (non-strict)
 When editing config, keep the YAML schema in `AppConfig` and its nested models
 (`LLMConfig`, `EmbeddingsConfig`, `AgentConfig`, …) as the source of truth. YAML
 unknown fields will fail validation — update the model first, then the YAML.
+
+`LLMConfig.resolved(provider)` merges per-provider overrides from
+`config.yaml:llm.providers.<name>` on top of the global defaults — use this
+instead of reading `llm.model` directly.
 
 ## Provider swap points (this is the whole point of the design)
 
@@ -83,6 +113,10 @@ Four paths, all converging on `Pipeline._ingest_one` in
    `ingest_from_lists()` call. `parse_video_id()` in
    `src/moppu/ingestion/youtube.py` handles all common URL formats plus bare IDs.
 
+`_ingest_one(source, info)`: `source` is a `channel_id` (`UC…`) for channel-based
+ingestion, or `"list:<list_name>"` for video-list-based ingestion. This distinction
+flows into `Video.source_type` in the DB.
+
 Transcripts come from `youtube-transcript-api`. If a video has no captions the
 video is marked `failed` with a reason; a future Whisper fallback is a TODO on
 `TranscriptFetcher`.
@@ -90,6 +124,13 @@ video is marked `failed` with a reason; a future Whisper fallback is a TODO on
 Chunks go both to SQL (`TranscriptChunk.embedding_id` links to Chroma id) and
 to Chroma. Keep these in sync — re-embedding means deleting old Chroma ids
 before upsert.
+
+## Video status lifecycle
+
+`Video.status` progresses through: `pending → embedded` on success, or
+`pending → failed` on error. The `transcribed` state is reserved but not
+currently written by the pipeline (it goes straight to `embedded` after chunking).
+A video with status `transcribed` or `embedded` is skipped on re-ingest.
 
 ## Agent / prompt update semantics
 
@@ -120,11 +161,19 @@ The agent must output strict JSON matching `_DECISION_SCHEMA` (
 
 ## Testing
 
-`pytest` is configured via `pyproject.toml` with `pythonpath = ["src"]`.
-SQLite in-memory is fine for DB-layer tests (`tests/test_db.py`). Avoid
-network-dependent tests in the default suite — they'll be flaky in CI. When
-adding provider tests, inject a fake `LLMProvider`/`Broker`/`Embedder`;
-the factories are the only places that touch real SDKs.
+`pytest` is configured via `pyproject.toml` with `pythonpath = ["src"]` and
+`asyncio_mode = "auto"` (all async test functions are run automatically without
+`@pytest.mark.asyncio`). SQLite in-memory is fine for DB-layer tests
+(`tests/test_db.py`). Avoid network-dependent tests in the default suite — they'll
+be flaky in CI. When adding provider tests, inject a fake
+`LLMProvider`/`Broker`/`Embedder`; the factories are the only places that touch
+real SDKs.
+
+## Logging
+
+Use `moppu.logging_setup.get_logger(__name__)` (returns a structlog logger).
+Log with keyword arguments: `log.info("event.name", key=value, ...)`. Event
+names follow `module.action` dot-notation (e.g. `ingest.ok`, `agent.parse_failed`).
 
 ## What's not built yet (don't assume it exists)
 

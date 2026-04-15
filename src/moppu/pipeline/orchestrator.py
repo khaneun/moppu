@@ -15,7 +15,7 @@ Exposes simple methods the CLI and the APScheduler job wrap.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -52,6 +52,40 @@ class Pipeline:
         self._watcher = watcher
         self._embedder = embedder
         self._store = vector_store
+
+    # ------------------------------------------------------------------ #
+    # Ingestion filters                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _spec_for(self, channel_id: str) -> ChannelSpec | None:
+        """Return the ChannelSpec from config that matches the given channel_id."""
+        for spec in self._channels_cfg.channels:
+            if spec.channel_id == channel_id:
+                return spec
+        return None
+
+    def _passes_filter(self, info: VideoInfo, spec: ChannelSpec) -> bool:
+        """Return False if info should be skipped according to spec filters."""
+        if spec.title_contains is not None:
+            title = info.title or ""
+            if spec.title_contains not in title:
+                log.info(
+                    "ingest.skipped.title_filter",
+                    video_id=info.video_id,
+                    title=title,
+                    filter=spec.title_contains,
+                )
+                return False
+        if spec.upload_day is not None:
+            if info.published_at is None or info.published_at.day != spec.upload_day:
+                log.info(
+                    "ingest.skipped.upload_day_filter",
+                    video_id=info.video_id,
+                    published_at=info.published_at,
+                    required_day=spec.upload_day,
+                )
+                return False
+        return True
 
     # ------------------------------------------------------------------ #
     # Channels                                                            #
@@ -98,7 +132,10 @@ class Pipeline:
                 log.warning("backfill.list_failed", channel_id=ch.channel_id, err=str(e))
                 continue
 
+            spec = self._spec_for(ch.channel_id)
             for v in videos:
+                if spec and not self._passes_filter(v, spec):
+                    continue
                 if self._ingest_one(ch.channel_id, v):
                     processed += 1
         return processed
@@ -111,11 +148,58 @@ class Pipeline:
         with self._sf() as session:
             channel_ids = [c.channel_id for c in session.query(Channel).filter_by(enabled=True).all()]
 
+        spec_map = {s.channel_id: s for s in self._channels_cfg.channels if s.channel_id}
         for event in self._watcher.poll_once(channel_ids):
+            spec = spec_map.get(event.channel_id)
+            if spec and not self._passes_filter(event.video, spec):
+                continue
             if self._ingest_one(event.channel_id, event.video):
                 processed += 1
             if processed >= batch:
                 break
+        return processed
+
+    def poll_upload_day_channels(self) -> int:
+        """Midnight job: poll channels whose upload_day matches yesterday's date.
+
+        Intended to run via the ``upload_day_cron`` scheduler job at 00:00 each
+        day. Finds channels configured with ``upload_day == yesterday.day``,
+        polls their RSS feeds, and ingests videos that also pass ``title_contains``.
+        """
+        yesterday_day = (datetime.now(timezone.utc) - timedelta(days=1)).day
+
+        target_ids = {
+            s.channel_id
+            for s in self._channels_cfg.channels
+            if s.upload_day == yesterday_day and s.enabled and s.channel_id
+        }
+        if not target_ids:
+            log.info("upload_day.no_channels", yesterday_day=yesterday_day)
+            return 0
+
+        log.info("upload_day.start", yesterday_day=yesterday_day, channels=list(target_ids))
+
+        with self._sf() as session:
+            channel_ids = [
+                c.channel_id
+                for c in session.query(Channel).filter_by(enabled=True).all()
+                if c.channel_id in target_ids
+            ]
+
+        batch = self._cfg.ingestion.batch_size
+        processed = 0
+        spec_map = {s.channel_id: s for s in self._channels_cfg.channels if s.channel_id}
+
+        for event in self._watcher.poll_once(channel_ids):
+            spec = spec_map.get(event.channel_id)
+            if spec and not self._passes_filter(event.video, spec):
+                continue
+            if self._ingest_one(event.channel_id, event.video):
+                processed += 1
+            if processed >= batch:
+                break
+
+        log.info("upload_day.done", yesterday_day=yesterday_day, ingested=processed)
         return processed
 
     def handle_push_event(self, event: NewVideoEvent) -> bool:

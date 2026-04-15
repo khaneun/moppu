@@ -32,11 +32,12 @@ class TranscriptResult:
 class TranscriptFetcher:
     def __init__(self, preferred_languages: list[str] | None = None) -> None:
         self.preferred_languages = preferred_languages or ["ko", "en"]
+        self._api = YouTubeTranscriptApi()
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10), reraise=True)
     def fetch(self, video_id: str) -> TranscriptResult | None:
         try:
-            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            transcript_list = self._api.list(video_id)
         except TranscriptsDisabled:
             log.info("transcript.disabled", video_id=video_id)
             return None
@@ -71,7 +72,7 @@ class TranscriptFetcher:
                 return None
 
         entries = transcript.fetch()
-        text = " ".join(_clean(e["text"]) for e in entries if e.get("text"))
+        text = " ".join(_clean(e.text) for e in entries if e.text)
         return TranscriptResult(
             video_id=video_id,
             language=transcript.language_code,

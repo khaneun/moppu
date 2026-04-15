@@ -8,11 +8,15 @@ Examples::
     moppu ask "오늘 S&P 500 관련 어떻게 봐?"
     moppu bot
     moppu scheduler
+    moppu dashboard
 """
 
 from __future__ import annotations
 
 import json
+import os
+import signal
+import subprocess
 from typing import Annotated
 
 import typer
@@ -20,6 +24,39 @@ import typer
 from moppu.runtime import build_runtime
 
 app = typer.Typer(add_completion=False, help="Moppu: YouTube-context trading agent")
+
+
+def _try_generate_summary(rt) -> None:
+    """Generate and persist today's ingestion summary (swallows errors)."""
+    from moppu.agent.daily_summary import generate_and_save
+    try:
+        result = generate_and_save(rt.session_factory, rt.llm, rt.cfg.app.data_dir)
+        if result:
+            typer.echo("  요약 생성 완료 → " + rt.cfg.app.data_dir.as_posix() +
+                       f"/daily_summary_{result['date']}.json")
+    except Exception as e:
+        typer.echo(f"  [WARN] 요약 생성 실패: {e}")
+
+
+def _kill_port(port: int) -> None:
+    """SIGTERM any process listening on *port*, then wait 1 s."""
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            capture_output=True, text=True,
+        )
+        pids = [p.strip() for p in result.stdout.strip().split("\n") if p.strip()]
+        for pid_str in pids:
+            try:
+                os.kill(int(pid_str), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        if pids:
+            import time
+            time.sleep(1)
+            typer.echo(f"  기존 프로세스 종료 (port {port})")
+    except Exception:
+        pass
 
 
 @app.command("sync-channels")
@@ -59,6 +96,8 @@ def ingest_lists(
     rt.pipeline.sync_video_lists()
     n = rt.pipeline.ingest_from_lists(list_name=list_name)
     typer.echo(f"Ingested: {n}")
+    if n > 0:
+        _try_generate_summary(rt)
 
 
 @app.command("poll")
@@ -95,12 +134,70 @@ def scheduler() -> None:
     from apscheduler.triggers.cron import CronTrigger
 
     rt = build_runtime()
+    stop_file = rt.cfg.app.data_dir / ".emergency_stop"
+
+    def guarded(fn):
+        def wrapper():
+            if stop_file.exists():
+                typer.echo("  [SKIP] emergency stop active")
+                return
+            return fn()
+        return wrapper
+
+    def upload_day_job():
+        """Poll upload-day channels, then generate daily summary."""
+        if stop_file.exists():
+            typer.echo("  [SKIP] emergency stop active")
+            return
+        from datetime import datetime as _dt
+        today_str = _dt.now().strftime("%Y-%m-%d")
+        log_file = rt.cfg.app.data_dir / "pipeline.log"
+
+        def wlog(msg: str) -> None:
+            ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+            with open(log_file, "a", encoding="utf-8") as _f:
+                _f.write(f"[{ts}] [SCHEDULER] {msg}\n")
+
+        # 수동 실행 마커가 있으면 당일 자정 자동 실행 건너뜀
+        ran_file = rt.cfg.app.data_dir / f".pipeline_ran_{today_str}"
+        if ran_file.exists():
+            wlog(f"[SKIP] 오늘 이미 수동 실행됨 ({today_str})")
+            typer.echo(f"  [SKIP] 오늘 이미 수동 실행됨 ({today_str})")
+            return
+        wlog("=== 자동 실행 시작 (upload_day_poll) ===")
+        n = rt.pipeline.poll_upload_day_channels()
+        wlog(f"수집 완료: {n}건")
+        if n > 0:
+            wlog("요약 생성 중...")
+            _try_generate_summary(rt)
+            wlog("요약 생성 완료")
+        wlog("=== 자동 실행 완료 ===")
+
     sched = BlockingScheduler()
 
     cron = rt.cfg.scheduler.poll_channels_cron
-    sched.add_job(rt.pipeline.poll_new, CronTrigger.from_crontab(cron), id="poll_channels")
-    typer.echo(f"Scheduler started with cron '{cron}'. Ctrl-C to stop.")
+    sched.add_job(guarded(rt.pipeline.poll_new), CronTrigger.from_crontab(cron), id="poll_channels")
+    typer.echo(f"  poll_channels   : {cron}")
+
+    upload_day_cron = rt.cfg.scheduler.upload_day_cron
+    sched.add_job(upload_day_job, CronTrigger.from_crontab(upload_day_cron), id="upload_day_poll")
+    typer.echo(f"  upload_day_poll : {upload_day_cron}")
+
+    typer.echo("Scheduler started. Ctrl-C to stop.")
     sched.start()
+
+
+@app.command("dashboard")
+def dashboard(
+    host: Annotated[str, typer.Option(help="Bind address")] = "0.0.0.0",
+    port: Annotated[int, typer.Option(help="Port number")] = 8000,
+) -> None:
+    """Start the Moppu Monitor web dashboard (kills existing process on port first)."""
+    import uvicorn
+
+    _kill_port(port)
+    typer.echo(f"Starting Moppu Monitor at http://{host}:{port}")
+    uvicorn.run("moppu.web.app:app", host=host, port=port, reload=False)
 
 
 if __name__ == "__main__":

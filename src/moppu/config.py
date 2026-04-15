@@ -44,12 +44,16 @@ class Settings(BaseSettings):
     # YouTube
     youtube_api_key: str | None = None
 
-    # KIS
+    # KIS 실전투자
     kis_app_key: str | None = None
     kis_app_secret: str | None = None
     kis_account_no: str | None = None
     kis_account_product_code: str = "01"
     kis_env: Literal["real", "paper"] = "paper"
+    # KIS 모의투자 (별도 키/계좌 — 없으면 실전 값 공용)
+    kis_paper_app_key: str | None = None
+    kis_paper_app_secret: str | None = None
+    kis_paper_account_no: str | None = None
 
     # Telegram
     telegram_bot_token: str | None = None
@@ -59,6 +63,10 @@ class Settings(BaseSettings):
     moppu_config_path: Path = Path("config/config.yaml")
     moppu_channels_path: Path = Path("config/channels.yaml")
     log_level: str = "INFO"
+
+    # Dashboard auth
+    dashboard_id: str = "moppu"
+    dashboard_password: str = "Gksrlgns12!"
 
     @property
     def allowed_chat_ids(self) -> list[int]:
@@ -161,6 +169,9 @@ class TelegramConfig(BaseModel):
 class SchedulerConfig(BaseModel):
     enabled: bool = True
     poll_channels_cron: str = "*/15 * * * *"
+    # Cron for the upload_day job — runs at midnight, ingests channels whose
+    # upload_day matches yesterday's date.
+    upload_day_cron: str = "0 0 * * *"
 
 
 class AppConfig(BaseModel):
@@ -192,6 +203,9 @@ class ChannelSpec(BaseModel):
     name: str | None = None
     tags: list[str] = Field(default_factory=list)
     enabled: bool = True
+    # Ingestion filters — both are optional; omit to collect everything.
+    title_contains: str | None = None  # only ingest if video title contains this string
+    upload_day: int | None = None       # only ingest videos published on this day-of-month (1–31)
 
     @field_validator("handle")
     @classmethod

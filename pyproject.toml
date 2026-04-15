@@ -44,6 +44,10 @@ dependencies = [
 
     # Scheduling
     "apscheduler>=3.10",
+
+    # Dashboard
+    "fastapi>=0.115",
+    "uvicorn>=0.30",
 ]
 
 [project.optional-dependencies]

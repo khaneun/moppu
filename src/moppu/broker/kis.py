@@ -74,11 +74,23 @@ class KISBroker:
     # Auth                                                                #
     # ------------------------------------------------------------------ #
 
+    @property
+    def _app_key(self) -> str:
+        if self._is_paper and self._settings.kis_paper_app_key:
+            return self._settings.kis_paper_app_key
+        return self._settings.kis_app_key or ""
+
+    @property
+    def _app_secret(self) -> str:
+        if self._is_paper and self._settings.kis_paper_app_secret:
+            return self._settings.kis_paper_app_secret
+        return self._settings.kis_app_secret or ""
+
     def _auth_header(self) -> dict[str, str]:
         return {
             "authorization": f"Bearer {self._get_token()}",
-            "appkey": self._settings.kis_app_key or "",
-            "appsecret": self._settings.kis_app_secret or "",
+            "appkey": self._app_key,
+            "appsecret": self._app_secret,
             "content-type": "application/json; charset=utf-8",
         }
 
@@ -91,8 +103,8 @@ class KISBroker:
             "/oauth2/tokenP",
             json={
                 "grant_type": "client_credentials",
-                "appkey": self._settings.kis_app_key,
-                "appsecret": self._settings.kis_app_secret,
+                "appkey": self._app_key,
+                "appsecret": self._app_secret,
             },
         )
         resp.raise_for_status()
@@ -216,6 +228,8 @@ class KISBroker:
 
     def _account_cano(self) -> str:
         # KIS accounts are 10-digit CANO + 2-digit product code.
+        if self._is_paper and self._settings.kis_paper_account_no:
+            return self._settings.kis_paper_account_no[:8]
         return (self._settings.kis_account_no or "")[:8]
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10), reraise=True)
