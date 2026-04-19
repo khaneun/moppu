@@ -400,15 +400,19 @@ class StrategyPlannerAgent:
     def _notify_completion(self, plan: TradePlan, results: list[dict]) -> None:
         from moppu.bot.telegram_bot import send_telegram_message
 
+        def _fmt(ticker: str) -> str:
+            name = _ticker_name_from_broker(self._broker, ticker)
+            return f"{name}({ticker})" if name else ticker
+
         sell_lines = (
             "\n".join(
-                f"  - {s.ticker} {'전량' if s.is_full else str(s.quantity) + '주'} 매도"
+                f"  - {_fmt(s.ticker)} {'전량' if s.is_full else str(s.quantity) + '주'} 매도"
                 for s in plan.sells
             ) or "  없음"
         )
         buy_lines = (
             "\n".join(
-                f"  - {b.ticker} {b.quantity}주 × {b.price:,.0f}원"
+                f"  - {_fmt(b.ticker)} {b.quantity}주 × {b.price:,.0f}원"
                 for b in plan.buys
             ) or "  없음"
         )
@@ -435,6 +439,17 @@ class StrategyPlannerAgent:
 
 # ── 유틸 함수 ─────────────────────────────────────────────────────────────────
 
+def _ticker_name_from_broker(broker: Any, ticker: str) -> str | None:
+    """KISBroker에 get_stock_name이 있으면 호출, 없으면 None."""
+    fn = getattr(broker, "get_stock_name", None)
+    if fn is None:
+        return None
+    try:
+        return fn(ticker)
+    except Exception:
+        return None
+
+
 def _format_portfolio(positions: list[Position], cash: float) -> str:
     lines = [f"가용 현금: {cash:,.0f}원", ""]
     if not positions:
@@ -443,8 +458,9 @@ def _format_portfolio(positions: list[Position], cash: float) -> str:
     lines.append("보유 종목:")
     for p in positions:
         pl = f"{p.unrealized_pl:+,.0f}원" if p.unrealized_pl is not None else "N/A"
+        label = f"{p.name}({p.ticker})" if p.name else p.ticker
         lines.append(
-            f"  {p.ticker}: {p.quantity}주 × {p.avg_price:,.0f}원 (평균단가) | 평가손익 {pl}"
+            f"  {label}: {p.quantity}주 × {p.avg_price:,.0f}원 (평균단가) | 평가손익 {pl}"
         )
     return "\n".join(lines)
 

@@ -41,6 +41,7 @@ PRICING_PER_1M: dict[tuple[str, str], tuple[float, float]] = {
 
 _rt: Runtime | None = None
 _token_log: list[dict[str, Any]] = []
+_ticker_name_cache: dict[str, str] = {}
 _token_log_path: Path | None = None
 _sessions: set[str] = set()
 _pipeline_running: bool = False
@@ -177,11 +178,14 @@ def overview():
         pos_list = []
         total_eval = data["cash_balance_krw"]
         for p in positions:
+            if p.name:
+                _ticker_name_cache[p.ticker] = p.name
             eval_amt = p.avg_price * p.quantity + (p.unrealized_pl or 0)
             total_eval += eval_amt
             pl_rate = ((p.unrealized_pl or 0) / (p.avg_price * p.quantity) * 100) if p.avg_price * p.quantity > 0 else 0
             pos_list.append({
                 "ticker": p.ticker,
+                "name": p.name,
                 "quantity": p.quantity,
                 "avg_price": p.avg_price,
                 "eval_amount": eval_amt,
@@ -1099,6 +1103,14 @@ def strategy_history(page: int = 1, per_page: int = 10):
             data = json.loads(f.read_text(encoding="utf-8"))
             plan = data.get("plan") or {}
             error = data.get("error")
+            sells = [
+                {**s, "name": _ticker_name_cache.get(s.get("ticker", ""))}
+                for s in plan.get("sells", [])
+            ]
+            buys = [
+                {**b, "name": _ticker_name_cache.get(b.get("ticker", ""))}
+                for b in plan.get("buys", [])
+            ]
             items.append({
                 "run_at": data.get("run_at"),
                 "dry_run": data.get("dry_run", True),
@@ -1107,8 +1119,8 @@ def strategy_history(page: int = 1, per_page: int = 10):
                 "summary": plan.get("summary", ""),
                 "sectors_to_add": plan.get("sectors_to_add", []),
                 "sectors_to_reduce": plan.get("sectors_to_reduce", []),
-                "sells": plan.get("sells", []),
-                "buys": plan.get("buys", []),
+                "sells": sells,
+                "buys": buys,
                 "total_sell_krw": plan.get("total_sell_krw", 0),
                 "total_buy_krw": plan.get("total_buy_krw", 0),
                 "n_results": len(data.get("results", [])),

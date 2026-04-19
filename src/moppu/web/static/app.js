@@ -161,7 +161,7 @@ async function loadOverview() {
         const cls = p.unrealized_pl >= 0 ? 'pl-positive' : 'pl-negative';
         const sign = p.unrealized_pl >= 0 ? '+' : '';
         return `<tr>
-          <td>${escHtml(p.ticker)}</td><td>${p.quantity}</td>
+          <td>${p.name ? escHtml(p.name) + '<br><span style="font-size:.75rem;color:var(--text-muted);">' + escHtml(p.ticker) + '</span>' : escHtml(p.ticker)}</td><td>${p.quantity}</td>
           <td>${krw(p.avg_price)}</td><td>${krw(p.eval_amount)}</td>
           <td class="${cls}">${sign}${krw(p.unrealized_pl)}</td>
           <td class="${cls}">${sign}${p.pl_rate}%</td>
@@ -1106,7 +1106,7 @@ function openStrategyDetail(itemJson) {
   const sells = (item.sells || []).map(s =>
     `<div class="strategy-trade-row">
       <span class="trade-side-sell">SELL</span>
-      <span style="font-weight:600;">${escHtml(s.ticker)}</span>
+      <span style="font-weight:600;">${s.name ? escHtml(s.name) + '(' + escHtml(s.ticker) + ')' : escHtml(s.ticker)}</span>
       <span style="color:var(--text-muted);font-size:.78rem;">${s.quantity < 0 ? '전량' : s.quantity + '주'}</span>
       <span style="flex:1;color:var(--text-muted);font-size:.78rem;">${escHtml(trunc(s.reason || '', 80))}</span>
     </div>`
@@ -1115,7 +1115,7 @@ function openStrategyDetail(itemJson) {
   const buys = (item.buys || []).map(b =>
     `<div class="strategy-trade-row">
       <span class="trade-side-buy">BUY</span>
-      <span style="font-weight:600;">${escHtml(b.ticker)}</span>
+      <span style="font-weight:600;">${b.name ? escHtml(b.name) + '(' + escHtml(b.ticker) + ')' : escHtml(b.ticker)}</span>
       <span style="color:var(--text-muted);font-size:.78rem;">${b.quantity}주 × ${b.price ? Math.round(b.price).toLocaleString('ko-KR') + '원' : '-'}</span>
       <span style="flex:1;color:var(--text-muted);font-size:.78rem;">${escHtml(trunc(b.reason || '', 80))}</span>
     </div>`

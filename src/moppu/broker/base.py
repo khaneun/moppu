@@ -34,6 +34,7 @@ class Position:
     quantity: int
     avg_price: float
     unrealized_pl: float | None = None
+    name: str | None = None
 
 
 @dataclass(slots=True)

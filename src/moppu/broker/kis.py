@@ -199,9 +199,22 @@ class KISBroker:
                     quantity=qty,
                     avg_price=float(row.get("pchs_avg_pric", 0) or 0),
                     unrealized_pl=float(row.get("evlu_pfls_amt", 0) or 0),
+                    name=row.get("prdt_name") or None,
                 )
             )
         return positions
+
+    def get_stock_name(self, ticker: str) -> str | None:
+        try:
+            data = self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/quotations/inquire-price",
+                tr_id=self.TR_INQUIRE_PRICE,
+                params={"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": ticker},
+            )
+            return data.get("output", {}).get("hts_kor_isnm") or None
+        except Exception:
+            return None
 
     def get_quote(self, ticker: str) -> Quote:
         data = self._request(
