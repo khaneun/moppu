@@ -234,6 +234,8 @@ tbody td {
 }
 
 tbody tr:hover td { background: var(--card-hover); }
+tbody tr.clickable-row { cursor: pointer; }
+tbody tr.clickable-row:hover td { background: rgba(59,130,246,.07); }
 
 .pl-positive { color: var(--profit); font-weight: 700; }
 .pl-negative { color: var(--loss); font-weight: 700; }

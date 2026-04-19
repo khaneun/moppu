@@ -93,6 +93,17 @@ function formatKoreanDateTime(isoStr) {
   } catch (_) { return isoStr; }
 }
 
+function formatDateTimeTwoLine(isoStr) {
+  if (!isoStr) return '-';
+  const s = isoStr.endsWith('Z') || isoStr.includes('+') ? isoStr : isoStr + 'Z';
+  try {
+    const d = new Date(s);
+    const date = d.toLocaleDateString('ko-KR', { timeZone: 'Asia/Seoul', year: 'numeric', month: '2-digit', day: '2-digit' });
+    const time = d.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+    return `<span style="display:block;white-space:nowrap;">${escHtml(date)}</span><span style="display:block;color:var(--text-muted);font-size:.7rem;white-space:nowrap;">${escHtml(time)}</span>`;
+  } catch (_) { return escHtml(isoStr); }
+}
+
 // ------------------------------------------------------------------ //
 // Modals
 // ------------------------------------------------------------------ //
@@ -462,12 +473,12 @@ async function loadIngestionHistory(page) {
     };
 
     tbody.innerHTML = data.items.map(v => {
-      const dt = v.created_at ? formatKoreanDateTime(v.created_at) : '-';
+      const dt = v.created_at ? formatDateTimeTwoLine(v.created_at) : '-';
       const url = v.url || `https://www.youtube.com/watch?v=${v.video_id}`;
       const title = trunc(v.title || v.video_id, 42);
       const src = v.channel_name ? escHtml(trunc(v.channel_name, 16)) : escHtml(sourceLabel(v.source_type));
       return `<tr>
-        <td style="font-size:.76rem;white-space:nowrap;color:var(--text-muted);">${escHtml(dt)}</td>
+        <td style="font-size:.76rem;">${dt}</td>
         <td><a href="${escHtml(url)}" target="_blank" style="color:var(--text);text-decoration:none;font-size:.82rem;" title="${escHtml(v.title||'')}">
           ${escHtml(title)}</a></td>
         <td style="font-size:.76rem;color:var(--text-muted);">${src}</td>
@@ -940,12 +951,7 @@ function _renderStrategyHistoryRow(item) {
   const isError     = item.status === 'error';
   const isCompleted = item.status === 'completed';
 
-  const dt      = item.run_at ? formatKoreanDateTime(item.run_at) : '방금';
-  const nSell   = (item.sells || []).length;
-  const nBuy    = (item.buys  || []).length;
-  const summary = isRunning ? 'LSY Agent와 대화 중...'
-                : isError   ? (item.error || '실행 실패')
-                : trunc(item.summary || '-', 60);
+  const dt = formatDateTimeTwoLine(item.run_at || new Date().toISOString());
 
   const statusBadge = isRunning
     ? '<span class="strategy-badge strategy-badge-running"><span class="spinner" style="width:8px;height:8px;border-width:1.5px;margin-right:2px;"></span>실행 중</span>'
@@ -957,20 +963,15 @@ function _renderStrategyHistoryRow(item) {
     ? '<span class="strategy-badge strategy-badge-dry">DRY</span>'
     : '<span class="strategy-badge strategy-badge-sell">실거래</span>';
 
-  const detailBtn = isCompleted
-    ? `<button class="btn-xs" onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})">상세</button>`
+  const clickable = isCompleted;
+  const trAttrs = clickable
+    ? `onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})" class="clickable-row"`
     : '';
 
-  const summaryColor = isError ? 'color:var(--warn);' : 'color:var(--text);';
-
-  return `<tr>
-    <td style="font-size:.74rem;white-space:nowrap;color:var(--text-muted);">${escHtml(dt)}</td>
+  return `<tr ${trAttrs}>
+    <td style="font-size:.78rem;">${dt}</td>
     <td>${statusBadge}</td>
-    <td>${modeBadge}</td>
-    <td style="text-align:center;">${nSell > 0 ? `<span class="strategy-badge strategy-badge-sell">${nSell}</span>` : '<span style="color:var(--text-muted);">-</span>'}</td>
-    <td style="text-align:center;">${nBuy  > 0 ? `<span class="strategy-badge strategy-badge-buy">${nBuy}</span>`  : '<span style="color:var(--text-muted);">-</span>'}</td>
-    <td style="font-size:.8rem;${summaryColor}">${escHtml(summary)}</td>
-    <td>${detailBtn}</td>
+    <td>${modeBadge}${clickable ? '<span style="float:right;color:var(--text-muted);font-size:.7rem;">›</span>' : ''}</td>
   </tr>`;
 }
 
@@ -984,7 +985,7 @@ function _renderStrategyHistory(apiItems) {
     rows += _renderStrategyHistoryRow(_strategyLiveItem);
   }
   if (!rows && !items.length) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-muted" style="text-align:center;padding:20px;">실행 이력이 없습니다.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="3" class="text-muted" style="text-align:center;padding:20px;">실행 이력이 없습니다.</td></tr>';
     return;
   }
   rows += items.map(item => _renderStrategyHistoryRow({ ...item, status: item.status || 'completed' })).join('');
