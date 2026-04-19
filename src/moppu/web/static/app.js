@@ -119,7 +119,7 @@ document.querySelectorAll('.tab').forEach(btn => {
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'overview') loadOverview();
-    if (btn.dataset.tab === 'agent')    { loadPipeline(); loadSuggestedQuestions(); }
+    if (btn.dataset.tab === 'agent')    { loadPipeline(); loadSuggestedQuestions(); loadStrategyConfig(); loadStrategyHistory(1); }
     if (btn.dataset.tab === 'settings') { loadSettings(); loadCost(); }
   });
 });
@@ -791,6 +791,210 @@ async function loadCost() {
       : '<tr><td colspan="5" class="text-muted">아직 LLM 호출 내역이 없습니다. Agent 대화 또는 요약 생성 후 표시됩니다.</td></tr>';
   } catch (e) { if (e.message !== '인증 필요') console.error('loadCost', e); }
 }
+
+// ================================================================== //
+// Strategy Planner
+// ================================================================== //
+
+let _strategyPage = 1;
+let _strategyPolling = null;
+
+async function loadStrategyConfig() {
+  try {
+    const data = await API.get('/api/strategy/config');
+
+    document.getElementById('inp-strategy-cron').value = data.cron || '30 9 * * 1-5';
+    document.getElementById('chk-strategy-dry-run').checked = data.dry_run;
+    document.getElementById('chk-strategy-enabled').checked = data.enabled;
+
+    const dryBadge = document.getElementById('strategy-dry-badge');
+    dryBadge.textContent = data.dry_run ? 'DRY RUN' : '실거래';
+    dryBadge.style.background = data.dry_run ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.15)';
+    dryBadge.style.color = data.dry_run ? '#fcd34d' : '#fca5a5';
+    dryBadge.style.border = data.dry_run ? '1px solid rgba(245,158,11,.3)' : '1px solid rgba(239,68,68,.3)';
+
+    if (data.running) {
+      _showStrategyStatus(data.last_msg || '실행 중...', 'running');
+      if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 3000);
+    } else if (data.last_msg) {
+      const isErr = data.last_msg.startsWith('오류');
+      _showStrategyStatus(data.last_msg, isErr ? 'error' : 'done');
+      if (_strategyPolling) { clearInterval(_strategyPolling); _strategyPolling = null; }
+    }
+  } catch (e) { if (e.message !== '인증 필요') console.error('loadStrategyConfig', e); }
+}
+
+async function _pollStrategyStatus() {
+  try {
+    const data = await API.get('/api/strategy/config');
+    if (data.running) {
+      _showStrategyStatus(data.last_msg || '실행 중...', 'running');
+    } else {
+      if (_strategyPolling) { clearInterval(_strategyPolling); _strategyPolling = null; }
+      const isErr = (data.last_msg || '').startsWith('오류');
+      _showStrategyStatus(data.last_msg || '', isErr ? 'error' : 'done');
+      if (!isErr) loadStrategyHistory(_strategyPage);
+    }
+  } catch (_) {}
+}
+
+function _showStrategyStatus(msg, state) {
+  const el = document.getElementById('strategy-run-status');
+  const msgEl = document.getElementById('strategy-run-msg');
+  if (!msg) { el.style.display = 'none'; return; }
+  el.style.display = 'flex';
+  el.className = 'run-status' + (state === 'error' ? ' error' : state === 'done' ? ' done' : '');
+  msgEl.innerHTML = state === 'running'
+    ? `<div class="spinner" style="display:inline-block;margin-right:6px;"></div>${escHtml(msg)}`
+    : escHtml(msg);
+}
+
+document.getElementById('btn-strategy-run').addEventListener('click', async () => {
+  if (!confirm('전략 수립가를 즉시 실행합니다.\nLSY Agent에게 섹터 분석·종목 추천을 요청하고 포트폴리오 계획을 수립합니다.\n\n계속하시겠습니까?')) return;
+  const btn = document.getElementById('btn-strategy-run');
+  btn.disabled = true;
+  try {
+    await API.post('/api/strategy/run', {});
+    _showStrategyStatus('전략 수립 시작...', 'running');
+    if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 3000);
+  } catch (e) {
+    alert(e.message || '실행 실패');
+  }
+  btn.disabled = false;
+});
+
+document.getElementById('btn-save-strategy-cfg').addEventListener('click', async () => {
+  const cron = document.getElementById('inp-strategy-cron').value.trim();
+  const dryRun = document.getElementById('chk-strategy-dry-run').checked;
+  const enabled = document.getElementById('chk-strategy-enabled').checked;
+  const statusEl = document.getElementById('strategy-cfg-status');
+  if (!cron) { statusEl.textContent = 'Cron 표현식을 입력하세요.'; return; }
+  statusEl.textContent = '저장 중...';
+  try {
+    await API.post('/api/strategy/config', { cron, dry_run: dryRun, enabled });
+    statusEl.textContent = `✓ 저장됨 — ${cron}`;
+    statusEl.style.color = 'var(--success)';
+    loadStrategyConfig();
+    setTimeout(() => { statusEl.textContent = ''; statusEl.style.color = ''; }, 3000);
+  } catch (e) {
+    statusEl.textContent = '저장 실패: ' + e.message;
+    statusEl.style.color = 'var(--danger)';
+  }
+});
+
+document.getElementById('btn-strategy-history-refresh').addEventListener('click', () => {
+  _strategyPage = 1;
+  loadStrategyHistory(1);
+});
+
+async function loadStrategyHistory(page) {
+  _strategyPage = page;
+  const listEl = document.getElementById('strategy-history-list');
+  const pagEl  = document.getElementById('strategy-pagination');
+  listEl.innerHTML = '<p class="text-muted" style="font-size:.8rem;">로딩 중...</p>';
+  try {
+    const data = await API.get(`/api/strategy/history?page=${page}&per_page=10`);
+    if (!data.items || !data.items.length) {
+      listEl.innerHTML = '<div class="strategy-empty">실행 이력이 없습니다.</div>';
+      pagEl.innerHTML = '';
+      return;
+    }
+
+    listEl.innerHTML = data.items.map((item, idx) => {
+      const dt = item.run_at ? formatKoreanDateTime(item.run_at) : '-';
+      const summary = trunc(item.summary || '요약 없음', 120);
+      const nSell = (item.sells || []).length;
+      const nBuy  = (item.buys  || []).length;
+      return `
+        <div class="strategy-history-item" onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})">
+          <div class="strategy-history-date">${escHtml(dt)}</div>
+          <div class="strategy-history-summary">${escHtml(summary)}</div>
+          <div class="strategy-history-meta">
+            ${item.dry_run ? '<span class="strategy-badge strategy-badge-dry">DRY</span>' : ''}
+            ${nSell > 0 ? `<span class="strategy-badge strategy-badge-sell">매도 ${nSell}</span>` : ''}
+            ${nBuy  > 0 ? `<span class="strategy-badge strategy-badge-buy">매수 ${nBuy}</span>`  : ''}
+          </div>
+        </div>`;
+    }).join('');
+
+    // 페이지네이션
+    if (data.total_pages > 1) {
+      let pagHtml = '';
+      if (page > 1) pagHtml += `<button onclick="loadStrategyHistory(${page - 1})">‹ 이전</button>`;
+      for (let p = 1; p <= data.total_pages; p++) {
+        pagHtml += `<button class="${p === page ? 'active' : ''}" onclick="loadStrategyHistory(${p})">${p}</button>`;
+      }
+      if (page < data.total_pages) pagHtml += `<button onclick="loadStrategyHistory(${page + 1})">다음 ›</button>`;
+      pagEl.innerHTML = pagHtml;
+    } else {
+      pagEl.innerHTML = '';
+    }
+  } catch (e) {
+    listEl.innerHTML = `<p class="text-warn">${escHtml(e.message)}</p>`;
+    pagEl.innerHTML = '';
+  }
+}
+
+function openStrategyDetail(itemJson) {
+  const item = JSON.parse(itemJson);
+  document.getElementById('strategy-modal-date').textContent = item.run_at ? formatKoreanDateTime(item.run_at) : '';
+
+  const sectorsAdd    = (item.sectors_to_add    || []).map(s => `<span class="sector-tag add">${escHtml(s)}</span>`).join('');
+  const sectorsReduce = (item.sectors_to_reduce || []).map(s => `<span class="sector-tag reduce">${escHtml(s)}</span>`).join('');
+
+  const sells = (item.sells || []).map(s =>
+    `<div class="strategy-trade-row">
+      <span class="trade-side-sell">SELL</span>
+      <span style="font-weight:600;">${escHtml(s.ticker)}</span>
+      <span style="color:var(--text-muted);font-size:.78rem;">${s.quantity < 0 ? '전량' : s.quantity + '주'}</span>
+      <span style="flex:1;color:var(--text-muted);font-size:.78rem;">${escHtml(trunc(s.reason || '', 80))}</span>
+    </div>`
+  ).join('') || '<p class="text-muted" style="font-size:.8rem;">매도 없음</p>';
+
+  const buys = (item.buys || []).map(b =>
+    `<div class="strategy-trade-row">
+      <span class="trade-side-buy">BUY</span>
+      <span style="font-weight:600;">${escHtml(b.ticker)}</span>
+      <span style="color:var(--text-muted);font-size:.78rem;">${b.quantity}주 × ${b.price ? Math.round(b.price).toLocaleString('ko-KR') + '원' : '-'}</span>
+      <span style="flex:1;color:var(--text-muted);font-size:.78rem;">${escHtml(trunc(b.reason || '', 80))}</span>
+    </div>`
+  ).join('') || '<p class="text-muted" style="font-size:.8rem;">매수 없음</p>';
+
+  document.getElementById('strategy-modal-body').innerHTML = `
+    <div class="strategy-modal-section">
+      <h4>전략 요약</h4>
+      <div class="md-content" style="font-size:.85rem;">${mdRender(item.summary || '요약 없음')}</div>
+    </div>
+
+    ${(item.sectors_to_add || []).length || (item.sectors_to_reduce || []).length ? `
+    <div class="strategy-modal-section">
+      <h4>섹터 조정</h4>
+      ${sectorsAdd ? `<div style="margin-bottom:6px;"><span style="font-size:.72rem;color:var(--text-muted);">추가·강화</span><div class="strategy-sector-tags">${sectorsAdd}</div></div>` : ''}
+      ${sectorsReduce ? `<div><span style="font-size:.72rem;color:var(--text-muted);">축소·정리</span><div class="strategy-sector-tags">${sectorsReduce}</div></div>` : ''}
+    </div>` : ''}
+
+    <div class="strategy-modal-section">
+      <h4>매도 계획</h4>
+      ${sells}
+    </div>
+
+    <div class="strategy-modal-section">
+      <h4>매수 계획</h4>
+      ${buys}
+    </div>
+
+    <div style="display:flex;gap:20px;margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+      <span style="font-size:.78rem;color:var(--text-muted);">예상 매도: <strong>${krw(item.total_sell_krw)}</strong></span>
+      <span style="font-size:.78rem;color:var(--text-muted);">예상 매수: <strong>${krw(item.total_buy_krw)}</strong></span>
+      ${item.dry_run ? '<span class="strategy-badge strategy-badge-dry" style="margin-left:auto;">DRY RUN</span>' : ''}
+    </div>
+  `;
+  document.getElementById('strategy-modal').style.display = 'flex';
+}
+
+document.getElementById('strategy-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('strategy-modal')) closeModal('strategy-modal');
+});
 
 // ================================================================== //
 // Init

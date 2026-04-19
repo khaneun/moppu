@@ -177,6 +177,17 @@ class SchedulerConfig(BaseModel):
     upload_day_cron: str = "0 0 * * *"
 
 
+class StrategyPlannerConfig(BaseModel):
+    enabled: bool = False
+    # 장 시작 후 30분 (KST 09:30, 평일)
+    cron: str = "30 9 * * 1-5"
+    dry_run: bool = True
+    # 전략 플래너는 여러 종목을 동시에 처리하므로 per-order 한도를 별도 설정
+    max_order_krw: int = 5_000_000
+    # 자금 요청 후 재확인까지 대기 시간 (분)
+    fund_request_wait_min: int = 10
+
+
 class AppConfig(BaseModel):
     app: AppSection = AppSection()
     storage: StorageConfig = StorageConfig()
@@ -187,6 +198,7 @@ class AppConfig(BaseModel):
     broker: BrokerConfig = BrokerConfig()
     telegram: TelegramConfig = TelegramConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
+    strategy_planner: StrategyPlannerConfig = StrategyPlannerConfig()
 
     @field_validator("app", mode="after")
     @classmethod

@@ -24,8 +24,8 @@ embeddings:
 # LLM provider used by the agent. Swap freely between providers/models.
 llm:
   # "openai" | "anthropic" | "google"
-  provider: anthropic
-  model: claude-sonnet-4-6
+  provider: openai
+  model: gpt-4.1
   temperature: 0.2
   max_tokens: 2048
   # Optional per-provider overrides
@@ -80,3 +80,15 @@ scheduler:
   # If true, run APScheduler loop in-process.
   enabled: true
   poll_channels_cron: "*/15 * * * *"
+
+strategy_planner:
+  # 전략 수립가 활성화 (false로 시작하고 검증 후 true로 변경하세요)
+  enabled: false
+  # 장 시작 후 30분, 평일만 (KST 기준 — 서버 시간대 확인 필요)
+  cron: "30 9 * * 1-5"
+  # true: 계획만 수립하고 실제 주문은 넣지 않음
+  dry_run: true
+  # 전략 플래너의 개별 주문 상한 (원). agent.max_order_krw와 별도.
+  max_order_krw: 5000000
+  # 자금 부족 시 Telegram 요청 후 재확인까지 대기 시간 (분)
+  fund_request_wait_min: 10

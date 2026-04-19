@@ -124,6 +124,33 @@ def poll() -> None:
     typer.echo(f"Polled. New videos ingested: {n}")
 
 
+@app.command("strategy")
+def strategy(
+    dry_run: Annotated[bool | None, typer.Option("--dry-run/--live", help="dry_run 강제 설정")] = None,
+) -> None:
+    """전략 수립가를 즉시 실행합니다 (포트폴리오 분석 → 계획 수립 → 매매)."""
+    rt = build_runtime()
+    if rt.strategy_planner is None:
+        from moppu.agent.strategy_planner import StrategyPlannerAgent
+        from moppu.config import StrategyPlannerConfig
+        planner = StrategyPlannerAgent(
+            cfg=StrategyPlannerConfig(enabled=True, dry_run=dry_run if dry_run is not None else True),
+            settings=rt.settings,
+            llm=rt.llm,
+            trader_agent=rt.agent,
+            broker=rt.broker,
+            data_dir=rt.cfg.app.data_dir,
+        )
+    else:
+        planner = rt.strategy_planner
+        if dry_run is not None:
+            planner._cfg.dry_run = dry_run  # noqa: SLF001
+
+    typer.echo(f"전략 수립가 시작 (dry_run={planner._cfg.dry_run})...")  # noqa: SLF001
+    result = planner.run()
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+
+
 @app.command("ask")
 def ask(message: Annotated[str, typer.Argument(help="Question / instruction for the agent")]) -> None:
     """Run the agent once and print its structured decision + execution result."""
@@ -198,6 +225,40 @@ def scheduler() -> None:
     upload_day_cron = rt.cfg.scheduler.upload_day_cron
     sched.add_job(upload_day_job, CronTrigger.from_crontab(upload_day_cron), id="upload_day_poll")
     typer.echo(f"  upload_day_poll : {upload_day_cron}")
+
+    # 전략 수립가 스케줄 (설정에서 enabled=true 일 때만)
+    sp_cfg = rt.cfg.strategy_planner
+    if sp_cfg.enabled:
+        from moppu.agent.strategy_planner import StrategyPlannerAgent
+
+        if rt.strategy_planner is None:
+            rt.strategy_planner = StrategyPlannerAgent(
+                cfg=sp_cfg,
+                settings=rt.settings,
+                llm=rt.llm,
+                trader_agent=rt.agent,
+                broker=rt.broker,
+            )
+        planner = rt.strategy_planner
+
+        def strategy_job() -> None:
+            if stop_file.exists():
+                typer.echo("  [SKIP] emergency stop active (strategy_planner)")
+                return
+            typer.echo("  [strategy_planner] 전략 수립 시작...")
+            try:
+                planner.run()
+            except Exception as e:
+                typer.echo(f"  [strategy_planner] 오류: {e}")
+
+        sched.add_job(
+            strategy_job,
+            CronTrigger.from_crontab(sp_cfg.cron),
+            id="strategy_planner",
+        )
+        typer.echo(f"  strategy_planner: {sp_cfg.cron} (dry_run={sp_cfg.dry_run})")
+    else:
+        typer.echo("  strategy_planner: disabled (config: strategy_planner.enabled=false)")
 
     typer.echo("Scheduler started. Ctrl-C to stop.")
     sched.start()

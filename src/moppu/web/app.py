@@ -809,6 +809,143 @@ def delete_video_entry(list_name: str, video_id: str):
 
 
 # -------------------------------------------------------------------- #
+# Strategy Planner                                                      #
+# -------------------------------------------------------------------- #
+
+_strategy_running: bool = False
+_strategy_run_msg: str = ""
+
+
+def _strategy_history_dir() -> Path:
+    base = _rt.cfg.app.data_dir if _rt else Path("data")
+    return Path(base) / "strategy_history"
+
+
+@app.get("/api/strategy/config")
+def strategy_config():
+    assert _rt is not None
+    sp = _rt.cfg.strategy_planner
+    return {
+        "enabled": sp.enabled,
+        "cron": sp.cron,
+        "dry_run": sp.dry_run,
+        "max_order_krw": sp.max_order_krw,
+        "fund_request_wait_min": sp.fund_request_wait_min,
+        "running": _strategy_running,
+        "last_msg": _strategy_run_msg,
+    }
+
+
+class StrategyScheduleRequest(BaseModel):
+    cron: str
+    dry_run: bool
+    enabled: bool = True
+
+
+@app.post("/api/strategy/config")
+def update_strategy_config(req: StrategyScheduleRequest):
+    assert _rt is not None
+    _rt.cfg.strategy_planner.cron = req.cron
+    _rt.cfg.strategy_planner.dry_run = req.dry_run
+    _rt.cfg.strategy_planner.enabled = req.enabled
+    if _rt.strategy_planner is not None:
+        _rt.strategy_planner._cfg.cron = req.cron        # noqa: SLF001
+        _rt.strategy_planner._cfg.dry_run = req.dry_run  # noqa: SLF001
+        _rt.strategy_planner._cfg.enabled = req.enabled  # noqa: SLF001
+    return {"ok": True, "cron": req.cron, "dry_run": req.dry_run, "enabled": req.enabled}
+
+
+@app.post("/api/strategy/run")
+def run_strategy():
+    global _strategy_running, _strategy_run_msg
+    assert _rt is not None
+    if _strategy_running:
+        raise HTTPException(409, "전략 수립가가 이미 실행 중입니다.")
+    if _is_emergency_stopped():
+        raise HTTPException(503, "긴급 중단 상태입니다.")
+
+    from moppu.agent.strategy_planner import StrategyPlannerAgent
+    from moppu.config import StrategyPlannerConfig
+
+    planner = _rt.strategy_planner
+    if planner is None:
+        sp_cfg = _rt.cfg.strategy_planner
+        planner = StrategyPlannerAgent(
+            cfg=StrategyPlannerConfig(
+                enabled=True,
+                dry_run=sp_cfg.dry_run,
+                cron=sp_cfg.cron,
+                max_order_krw=sp_cfg.max_order_krw,
+                fund_request_wait_min=sp_cfg.fund_request_wait_min,
+            ),
+            settings=_rt.settings,
+            llm=_rt.llm,
+            trader_agent=_rt.agent,
+            broker=_rt.broker,
+            data_dir=_rt.cfg.app.data_dir,
+        )
+
+    def _run() -> None:
+        global _strategy_running, _strategy_run_msg
+        _strategy_running = True
+        _strategy_run_msg = "전략 수립 시작..."
+        try:
+            result = planner.run()
+            n_sells = len((result.get("plan") or {}).get("sells", []))
+            n_buys = len((result.get("plan") or {}).get("buys", []))
+            _strategy_run_msg = f"완료 — 매도 {n_sells}건 / 매수 {n_buys}건"
+        except Exception as e:
+            _strategy_run_msg = f"오류: {e}"
+            log.error("web.strategy_run_failed", err=str(e))
+        finally:
+            _strategy_running = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"started": True, "message": "전략 수립을 시작했습니다."}
+
+
+@app.get("/api/strategy/history")
+def strategy_history(page: int = 1, per_page: int = 10):
+    hist_dir = _strategy_history_dir()
+    if not hist_dir.exists():
+        return {"items": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
+
+    files = sorted(hist_dir.glob("*.json"), reverse=True)
+    total = len(files)
+    start = (page - 1) * per_page
+    page_files = files[start : start + per_page]
+
+    items = []
+    for f in page_files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            plan = data.get("plan") or {}
+            items.append({
+                "run_at": data.get("run_at"),
+                "dry_run": data.get("dry_run", True),
+                "summary": plan.get("summary", ""),
+                "sectors_to_add": plan.get("sectors_to_add", []),
+                "sectors_to_reduce": plan.get("sectors_to_reduce", []),
+                "sells": plan.get("sells", []),
+                "buys": plan.get("buys", []),
+                "total_sell_krw": plan.get("total_sell_krw", 0),
+                "total_buy_krw": plan.get("total_buy_krw", 0),
+                "n_results": len(data.get("results", [])),
+                "filename": f.name,
+            })
+        except Exception:
+            pass
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page) if total else 0,
+    }
+
+
+# -------------------------------------------------------------------- #
 # Local Collector API  (로컬 PC → EC2 자막 전송)                        #
 # -------------------------------------------------------------------- #
 

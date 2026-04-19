@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from moppu.agent import PromptBuilder, RAGRetriever, TraderAgent
+from moppu.agent.strategy_planner import StrategyPlannerAgent
 from moppu.broker import KISBroker
 from moppu.broker.base import Broker
 from moppu.config import AppConfig, ChannelsConfig, Settings, load_app_config, load_channels
@@ -36,6 +37,7 @@ class Runtime:
     pipeline: Pipeline
     agent: TraderAgent
     broker: Broker | None
+    strategy_planner: StrategyPlannerAgent | None
 
 
 def build_runtime() -> Runtime:
@@ -98,6 +100,17 @@ def build_runtime() -> Runtime:
         broker=broker,
     )
 
+    strategy_planner: StrategyPlannerAgent | None = None
+    if cfg.strategy_planner.enabled:
+        strategy_planner = StrategyPlannerAgent(
+            cfg=cfg.strategy_planner,
+            settings=settings,
+            llm=llm,
+            trader_agent=agent,
+            broker=broker,
+            data_dir=cfg.app.data_dir,
+        )
+
     return Runtime(
         settings=settings,
         cfg=cfg,
@@ -109,4 +122,5 @@ def build_runtime() -> Runtime:
         pipeline=pipeline,
         agent=agent,
         broker=broker,
+        strategy_planner=strategy_planner,
     )
