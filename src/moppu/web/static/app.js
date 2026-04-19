@@ -170,36 +170,68 @@ async function loadOverview() {
     }
   } catch (e) { if (e.message !== '인증 필요') console.error('loadOverview', e); }
 
-  loadSummaryLabel();
+  loadSummaryList(1);
 }
 
-// ---- Summary label ----
+// ---- Summary list ----
 
-let _summaryData = null;
+let _summaryPage = 1;
+const _summaryCache = {};
 
-async function loadSummaryLabel() {
-  const labelEl = document.getElementById('ingestion-summary-label');
+function openSummaryDetail(item) {
+  document.getElementById('summary-modal').style.display = 'flex';
+  renderModalSummary(item);
+}
+
+function openSummaryByDate(date) {
+  const item = _summaryCache[date];
+  if (item) openSummaryDetail(item);
+}
+
+async function loadSummaryList(page) {
+  _summaryPage = page;
+  const body = document.getElementById('summary-list-body');
+  const pagEl = document.getElementById('summary-pagination-btns');
+  if (!body) return;
+  body.innerHTML = '<p class="text-muted" style="font-size:.8rem;">로딩 중...</p>';
   try {
-    const data = await API.get('/api/agent/summary');
-    _summaryData = data;
-    const today = data.date || new Date().toISOString().slice(0, 10);
-
-    const cnt = data.videos ? data.videos.length : 0;
-    if (!cnt) {
-      labelEl.innerHTML = `<span class="label-none">${escHtml(today)} 영상 없음</span>`;
-      labelEl.style.cursor = 'default';
-      labelEl.onclick = null;
-    } else if (data.summary) {
-      labelEl.innerHTML = `<span class="label-text">📋 ${escHtml(today)} 영상 요약본(${cnt}건)</span>`;
-      labelEl.onclick = openSummaryModal;
-    } else {
-      labelEl.innerHTML = `<span class="label-none">${escHtml(today)} 수집 ${cnt}건 (요약 미생성)</span>`;
-      labelEl.onclick = openSummaryModal;
+    const data = await API.get(`/api/agent/summary-list?page=${page}&per_page=5`);
+    if (!data.items || !data.items.length) {
+      body.innerHTML = '<p class="text-muted" style="font-size:.8rem;">수집 요약이 없습니다.</p>';
+      if (pagEl) pagEl.innerHTML = '';
+      return;
+    }
+    data.items.forEach(item => { _summaryCache[item.date] = item; });
+    body.innerHTML = data.items.map(item => {
+      const cnt = (item.videos || []).length;
+      return `<div class="clickable-row" data-summary-date="${escHtml(item.date)}"
+        style="display:flex;align-items:center;gap:8px;padding:7px 2px;border-bottom:1px solid var(--border);cursor:pointer;">
+        <span style="font-size:.82rem;font-weight:600;color:#e2e8f0;">${escHtml(item.date)}</span>
+        <span style="font-size:.75rem;color:var(--text-muted);">영상 ${cnt}건</span>
+        ${item.summary ? '<span style="font-size:.72rem;color:var(--success);">📋 요약</span>' : ''}
+        <span style="margin-left:auto;color:var(--text-muted);font-size:.85rem;">›</span>
+      </div>`;
+    }).join('');
+    if (pagEl) {
+      if (data.total_pages > 1) {
+        let h = '';
+        if (page > 1) h += `<button class="btn btn-secondary btn-sm" style="padding:2px 7px;" onclick="loadSummaryList(${page - 1})">‹</button>`;
+        h += `<span style="font-size:.72rem;color:var(--text-muted);margin:0 5px;">${page}/${data.total_pages}</span>`;
+        if (page < data.total_pages) h += `<button class="btn btn-secondary btn-sm" style="padding:2px 7px;" onclick="loadSummaryList(${page + 1})">›</button>`;
+        pagEl.innerHTML = h;
+      } else {
+        pagEl.innerHTML = '';
+      }
     }
   } catch (e) {
-    if (e.message !== '인증 필요') labelEl.innerHTML = '<span class="label-none">데이터 로드 실패</span>';
+    if (e.message !== '인증 필요' && body) body.innerHTML = `<p class="text-warn" style="font-size:.8rem;">${escHtml(e.message)}</p>`;
   }
 }
+
+document.getElementById('summary-list-body').addEventListener('click', (e) => {
+  const row = e.target.closest('[data-summary-date]');
+  if (row) openSummaryByDate(row.dataset.summaryDate);
+});
 
 // ---- Summary modal ----
 
@@ -238,29 +270,6 @@ function renderModalSummary(data) {
   } else { sourcesEl.innerHTML = ''; }
 }
 
-async function openSummaryModal() {
-  const modal = document.getElementById('summary-modal');
-  const textEl = document.getElementById('modal-summary-text');
-  const sourcesEl = document.getElementById('modal-sources');
-  modal.style.display = 'flex';
-
-  if (_summaryData && _summaryData.summary) {
-    renderModalSummary(_summaryData);
-    return;
-  }
-  textEl.innerHTML = '<div class="modal-loading">요약 생성 중</div>';
-  sourcesEl.innerHTML = '';
-  try {
-    const data = await API.post('/api/agent/generate-summary', {});
-    _summaryData = { ..._summaryData, ...data };
-    renderModalSummary(data);
-    // 레이블 갱신
-    if (data.summary) {
-      const today = data.date || '';
-      document.getElementById('ingestion-summary-label').innerHTML = `<span class="label-text">📋 ${escHtml(today)} 영상 요약본</span>`;
-    }
-  } catch (e) { textEl.textContent = e.message || '요약 생성 실패'; }
-}
 
 // ================================================================== //
 // Agent Tab
@@ -952,7 +961,7 @@ function _renderStrategyHistoryRow(item) {
 
   const clickable = isCompleted;
   const trAttrs = clickable
-    ? `onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})" class="clickable-row"`
+    ? `data-strategy-json="${escHtml(JSON.stringify(item))}" class="clickable-row"`
     : '';
 
   return `<tr ${trAttrs}>
@@ -1042,6 +1051,11 @@ document.getElementById('btn-save-strategy-cfg').addEventListener('click', async
 document.getElementById('btn-strategy-history-refresh').addEventListener('click', () => {
   _strategyLiveItem = null;
   loadStrategyHistory(1);
+});
+
+document.getElementById('strategy-history-body').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-strategy-json]');
+  if (tr) openStrategyDetail(tr.dataset.strategyJson);
 });
 
 async function loadStrategyHistory(page) {
@@ -1170,10 +1184,6 @@ async function openIngestDetail(videoId) {
       ? `<span style="font-size:.75rem;color:var(--text-muted);margin-left:8px;">(청크 ${d.n_chunks}개 임베딩됨)</span>`
       : '';
 
-    const transcriptHtml = d.transcript_preview
-      ? `<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:.82rem;line-height:1.7;color:#cbd5e1;max-height:260px;overflow-y:auto;white-space:pre-wrap;">${escHtml(d.transcript_preview)}${d.n_chunks > 1 ? '\n\n…(이하 생략)' : ''}</div>`
-      : '<p class="text-muted" style="font-size:.82rem;">트랜스크립트 없음</p>';
-
     body.innerHTML = `
       <div style="margin-bottom:16px;">
         <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">제목</p>
@@ -1192,10 +1202,6 @@ async function openIngestDetail(videoId) {
       <div style="margin-bottom:16px;">
         <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">영상</p>
         <a href="${escHtml(url)}" target="_blank" style="color:var(--primary);font-size:.85rem;word-break:break-all;">${escHtml(url)}</a>
-      </div>
-      <div>
-        <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">트랜스크립트 미리보기 <span style="font-weight:400;text-transform:none;">(1번 청크)</span></p>
-        ${transcriptHtml}
       </div>`;
   } catch (e) {
     body.innerHTML = `<p class="text-warn">${escHtml(e.message)}</p>`;

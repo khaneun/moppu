@@ -378,6 +378,36 @@ def ingestion_summary():
     return {"date": today_str, "summary": None, "videos": videos}
 
 
+@app.get("/api/agent/summary-list")
+def summary_list(page: int = 1, per_page: int = 5):
+    """Return paginated list of saved daily summaries, newest first."""
+    assert _rt is not None
+    data_dir = _rt.cfg.app.data_dir
+    files = sorted(data_dir.glob("daily_summary_*.json"), reverse=True)
+    total = len(files)
+    start = (page - 1) * per_page
+    page_files = files[start : start + per_page]
+    items = []
+    for f in page_files:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            items.append({
+                "date": data.get("date"),
+                "summary": data.get("summary"),
+                "videos": data.get("videos", []),
+                "generated_at": data.get("generated_at"),
+            })
+        except Exception:
+            pass
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page) if total else 0,
+    }
+
+
 class SummaryRequest(BaseModel):
     force: bool = False
 

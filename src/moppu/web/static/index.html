@@ -55,10 +55,11 @@
         </div>
 
         <div class="card">
-          <h3>수집 요약</h3>
-          <div id="ingestion-summary-label" class="summary-label-clickable">
-            <p class="text-muted">로딩 중...</p>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <h3 style="margin:0;">수집 요약</h3>
+            <div id="summary-pagination-btns" style="display:flex;align-items:center;gap:4px;"></div>
           </div>
+          <div id="summary-list-body"><p class="text-muted" style="font-size:.8rem;">로딩 중...</p></div>
         </div>
       </div>
 
@@ -404,6 +405,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=9"></script>
+  <script src="/static/app.js?v=10"></script>
 </body>
 </html>
