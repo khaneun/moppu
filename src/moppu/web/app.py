@@ -809,6 +809,49 @@ def delete_video_entry(list_name: str, video_id: str):
 
 
 # -------------------------------------------------------------------- #
+# Pipeline ingestion history                                            #
+# -------------------------------------------------------------------- #
+
+
+@app.get("/api/pipeline/ingestion-history")
+def ingestion_history(page: int = 1, per_page: int = 10):
+    assert _rt is not None
+    with _rt.session_factory() as s:
+        total = s.query(func.count(Video.id)).scalar() or 0
+        videos = (
+            s.query(Video)
+            .order_by(desc(Video.created_at))
+            .offset((page - 1) * per_page)
+            .limit(per_page)
+            .all()
+        )
+        items = []
+        for v in videos:
+            ch_name = None
+            if v.channel_fk:
+                ch = s.query(Channel).filter_by(id=v.channel_fk).one_or_none()
+                ch_name = ch.name if ch else None
+            items.append({
+                "video_id": v.video_id,
+                "title": v.title,
+                "status": v.status,
+                "source_type": v.source_type,
+                "channel_name": ch_name,
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+                "published_at": v.published_at.isoformat() if v.published_at else None,
+                "url": v.url or f"https://www.youtube.com/watch?v={v.video_id}",
+                "error": v.error,
+            })
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": max(1, (total + per_page - 1) // per_page) if total else 0,
+    }
+
+
+# -------------------------------------------------------------------- #
 # Strategy Planner                                                      #
 # -------------------------------------------------------------------- #
 
@@ -895,8 +938,26 @@ def run_strategy():
             n_buys = len((result.get("plan") or {}).get("buys", []))
             _strategy_run_msg = f"완료 — 매도 {n_sells}건 / 매수 {n_buys}건"
         except Exception as e:
-            _strategy_run_msg = f"오류: {e}"
-            log.error("web.strategy_run_failed", err=str(e))
+            err_str = str(e)
+            _strategy_run_msg = f"오류: {err_str}"
+            log.error("web.strategy_run_failed", err=err_str)
+            # 실패 이력도 저장
+            try:
+                hist_dir = _strategy_history_dir()
+                hist_dir.mkdir(parents=True, exist_ok=True)
+                from datetime import datetime as _dt
+                ts = _dt.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
+                (hist_dir / f"{ts}.json").write_text(
+                    json.dumps({
+                        "run_at": _dt.now(KST).isoformat(),
+                        "dry_run": planner._cfg.dry_run,  # noqa: SLF001
+                        "error": err_str,
+                        "plan": {"sells": [], "buys": [], "summary": f"실행 실패: {err_str}"},
+                        "results": [],
+                    }, ensure_ascii=False)
+                )
+            except Exception:
+                pass
         finally:
             _strategy_running = False
 
@@ -920,9 +981,12 @@ def strategy_history(page: int = 1, per_page: int = 10):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
             plan = data.get("plan") or {}
+            error = data.get("error")
             items.append({
                 "run_at": data.get("run_at"),
                 "dry_run": data.get("dry_run", True),
+                "status": "error" if error else "completed",
+                "error": error,
                 "summary": plan.get("summary", ""),
                 "sectors_to_add": plan.get("sectors_to_add", []),
                 "sectors_to_reduce": plan.get("sectors_to_reduce", []),

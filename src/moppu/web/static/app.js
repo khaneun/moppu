@@ -118,9 +118,10 @@ document.querySelectorAll('.tab').forEach(btn => {
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('tab-' + btn.dataset.tab).classList.add('active');
-    if (btn.dataset.tab === 'overview') loadOverview();
-    if (btn.dataset.tab === 'agent')    { loadPipeline(); loadSuggestedQuestions(); loadStrategyConfig(); loadStrategyHistory(1); }
-    if (btn.dataset.tab === 'settings') { loadSettings(); loadCost(); }
+    if (btn.dataset.tab === 'overview')  loadOverview();
+    if (btn.dataset.tab === 'agent')     { loadSuggestedQuestions(); loadStrategyConfig(); loadStrategyHistory(1); }
+    if (btn.dataset.tab === 'pipeline')  { loadPipeline(); loadIngestionHistory(1); }
+    if (btn.dataset.tab === 'settings')  { loadSettings(); loadCost(); }
   });
 });
 
@@ -429,6 +430,70 @@ async function loadPipeline() {
 // ---- Pipeline refresh ----
 
 document.getElementById('btn-pipeline-refresh').addEventListener('click', () => loadPipeline());
+document.getElementById('btn-ingest-history-refresh').addEventListener('click', () => loadIngestionHistory(_ingestPage));
+
+// ---- Ingestion history ----
+
+let _ingestPage = 1;
+
+async function loadIngestionHistory(page) {
+  _ingestPage = page;
+  const tbody = document.getElementById('ingest-history-body');
+  const pagEl  = document.getElementById('ingest-pagination');
+  tbody.innerHTML = '<tr><td colspan="5" class="text-muted">로딩 중...</td></tr>';
+  try {
+    const data = await API.get(`/api/pipeline/ingestion-history?page=${page}&per_page=10`);
+    if (!data.items || !data.items.length) {
+      tbody.innerHTML = '<tr><td colspan="5" class="text-muted" style="text-align:center;padding:20px;">수집 이력이 없습니다.</td></tr>';
+      pagEl.innerHTML = '';
+      return;
+    }
+
+    const statusBadge = (s, err) => {
+      if (s === 'embedded')    return '<span class="ingest-badge ingest-badge-embedded">임베딩 완료</span>';
+      if (s === 'failed')      return `<span class="ingest-badge ingest-badge-failed" title="${escHtml(err||'')}">실패</span>`;
+      return '<span class="ingest-badge ingest-badge-pending">대기</span>';
+    };
+
+    const sourceLabel = (src) => {
+      if (!src) return '-';
+      if (src.startsWith('list:')) return src.replace('list:', '목록: ');
+      return '채널';
+    };
+
+    tbody.innerHTML = data.items.map(v => {
+      const dt = v.created_at ? formatKoreanDateTime(v.created_at) : '-';
+      const url = v.url || `https://www.youtube.com/watch?v=${v.video_id}`;
+      const title = trunc(v.title || v.video_id, 42);
+      const src = v.channel_name ? escHtml(trunc(v.channel_name, 16)) : escHtml(sourceLabel(v.source_type));
+      return `<tr>
+        <td style="font-size:.76rem;white-space:nowrap;color:var(--text-muted);">${escHtml(dt)}</td>
+        <td><a href="${escHtml(url)}" target="_blank" style="color:var(--text);text-decoration:none;font-size:.82rem;" title="${escHtml(v.title||'')}">
+          ${escHtml(title)}</a></td>
+        <td style="font-size:.76rem;color:var(--text-muted);">${src}</td>
+        <td>${statusBadge(v.status, v.error)}</td>
+        <td><a href="${escHtml(url)}" target="_blank" style="font-size:.72rem;color:var(--primary);">▶</a></td>
+      </tr>`;
+    }).join('');
+
+    // 페이지네이션
+    if (data.total_pages > 1) {
+      let pagHtml = '';
+      if (page > 1) pagHtml += `<button onclick="loadIngestionHistory(${page - 1})">‹ 이전</button>`;
+      const start = Math.max(1, page - 2), end = Math.min(data.total_pages, page + 2);
+      for (let p = start; p <= end; p++) {
+        pagHtml += `<button class="${p === page ? 'active' : ''}" onclick="loadIngestionHistory(${p})">${p}</button>`;
+      }
+      if (page < data.total_pages) pagHtml += `<button onclick="loadIngestionHistory(${page + 1})">다음 ›</button>`;
+      pagEl.innerHTML = pagHtml;
+    } else {
+      pagEl.innerHTML = '';
+    }
+  } catch (e) {
+    tbody.innerHTML = `<tr><td colspan="5" class="text-warn">${escHtml(e.message)}</td></tr>`;
+    pagEl.innerHTML = '';
+  }
+}
 
 // 로그 파일 최신 줄로 상태 메시지 업데이트 (로컬 수집 완료 등 반영)
 async function _updateStatusFromLog(msgEl, fallback) {
@@ -798,28 +863,38 @@ async function loadCost() {
 
 let _strategyPage = 1;
 let _strategyPolling = null;
+let _strategyLiveItem = null;   // 실행 중인 항목 (optimistic)
 
 async function loadStrategyConfig() {
   try {
     const data = await API.get('/api/strategy/config');
-
     document.getElementById('inp-strategy-cron').value = data.cron || '30 9 * * 1-5';
     document.getElementById('chk-strategy-dry-run').checked = data.dry_run;
     document.getElementById('chk-strategy-enabled').checked = data.enabled;
 
     const dryBadge = document.getElementById('strategy-dry-badge');
+    dryBadge.style.display = 'inline-flex';
     dryBadge.textContent = data.dry_run ? 'DRY RUN' : '실거래';
-    dryBadge.style.background = data.dry_run ? 'rgba(245,158,11,.15)' : 'rgba(239,68,68,.15)';
-    dryBadge.style.color = data.dry_run ? '#fcd34d' : '#fca5a5';
-    dryBadge.style.border = data.dry_run ? '1px solid rgba(245,158,11,.3)' : '1px solid rgba(239,68,68,.3)';
+    dryBadge.className = 'strategy-badge ' + (data.dry_run ? 'strategy-badge-dry' : 'strategy-badge-sell');
 
+    // 서버가 실행 중이면 live item 복원 후 폴링 시작
     if (data.running) {
-      _showStrategyStatus(data.last_msg || '실행 중...', 'running');
+      if (!_strategyLiveItem) {
+        _strategyLiveItem = { run_at: new Date().toISOString(), status: 'running' };
+      }
+      _renderStrategyHistory(null);   // live item만 보여줌 (API data는 뒤에서 로드)
+      _showStrategyStatus(data.last_msg || '전략 수립 진행 중...', 'running');
       if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 3000);
-    } else if (data.last_msg) {
-      const isErr = data.last_msg.startsWith('오류');
-      _showStrategyStatus(data.last_msg, isErr ? 'error' : 'done');
-      if (_strategyPolling) { clearInterval(_strategyPolling); _strategyPolling = null; }
+    } else {
+      if (_strategyLiveItem && _strategyLiveItem.status === 'running') {
+        // 서버는 완료됐는데 live item이 남아있으면 정리
+        _strategyLiveItem = null;
+        loadStrategyHistory(1);
+      }
+      if (data.last_msg) {
+        const isErr = data.last_msg.startsWith('오류');
+        _showStrategyStatus(data.last_msg, isErr ? 'error' : 'done');
+      }
     }
   } catch (e) { if (e.message !== '인증 필요') console.error('loadStrategyConfig', e); }
 }
@@ -828,25 +903,88 @@ async function _pollStrategyStatus() {
   try {
     const data = await API.get('/api/strategy/config');
     if (data.running) {
-      _showStrategyStatus(data.last_msg || '실행 중...', 'running');
+      if (_strategyLiveItem) _strategyLiveItem.status = 'running';
+      _showStrategyStatus(data.last_msg || '전략 수립 진행 중...', 'running');
+      _renderStrategyHistory(null);
     } else {
       if (_strategyPolling) { clearInterval(_strategyPolling); _strategyPolling = null; }
       const isErr = (data.last_msg || '').startsWith('오류');
+      if (_strategyLiveItem) {
+        _strategyLiveItem.status = isErr ? 'error' : 'completed';
+        _strategyLiveItem.error  = isErr ? data.last_msg : null;
+        _renderStrategyHistory(null);
+      }
       _showStrategyStatus(data.last_msg || '', isErr ? 'error' : 'done');
-      if (!isErr) loadStrategyHistory(_strategyPage);
+      // 완료되면 실제 이력 다시 로드 (파일이 저장됐을 것)
+      setTimeout(() => {
+        _strategyLiveItem = null;
+        loadStrategyHistory(1);
+      }, 1500);
     }
   } catch (_) {}
 }
 
 function _showStrategyStatus(msg, state) {
-  const el = document.getElementById('strategy-run-status');
+  const el    = document.getElementById('strategy-run-status');
   const msgEl = document.getElementById('strategy-run-msg');
   if (!msg) { el.style.display = 'none'; return; }
   el.style.display = 'flex';
   el.className = 'run-status' + (state === 'error' ? ' error' : state === 'done' ? ' done' : '');
   msgEl.innerHTML = state === 'running'
-    ? `<div class="spinner" style="display:inline-block;margin-right:6px;"></div>${escHtml(msg)}`
+    ? `<div class="spinner" style="display:inline-block;margin-right:6px;width:14px;height:14px;"></div>${escHtml(msg)}`
     : escHtml(msg);
+}
+
+function _renderStrategyHistoryItem(item) {
+  const isRunning   = item.status === 'running';
+  const isError     = item.status === 'error';
+  const isCompleted = item.status === 'completed';
+
+  const dt      = item.run_at ? formatKoreanDateTime(item.run_at) : '방금 시작';
+  const nSell   = (item.sells || []).length;
+  const nBuy    = (item.buys  || []).length;
+  const summary = isRunning ? 'LSY Agent와 대화 중...'
+                : isError   ? (item.error || '실행 실패')
+                : trunc(item.summary || '요약 없음', 100);
+
+  const clickable = isCompleted && !isError;
+  const cls = isRunning ? 'is-running' : isError ? 'is-error' : '';
+  const onclick = clickable ? `onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})"` : '';
+
+  const statusBadge = isRunning
+    ? '<span class="strategy-badge strategy-badge-running"><span class="spinner" style="width:8px;height:8px;border-width:1.5px;margin-right:2px;"></span>실행 중</span>'
+    : isError
+    ? '<span class="strategy-badge strategy-badge-error">실행 실패</span>'
+    : '<span class="strategy-badge strategy-badge-ok">완료</span>';
+
+  return `
+    <div class="strategy-history-item ${cls}" ${onclick} style="${clickable ? '' : 'cursor:default;'}">
+      <div class="strategy-history-top">
+        <span class="strategy-history-date">${escHtml(dt)}</span>
+        ${statusBadge}
+        ${item.dry_run ? '<span class="strategy-badge strategy-badge-dry">DRY</span>' : ''}
+        ${nSell > 0 ? `<span class="strategy-badge strategy-badge-sell">매도 ${nSell}</span>` : ''}
+        ${nBuy  > 0 ? `<span class="strategy-badge strategy-badge-buy">매수 ${nBuy}</span>`  : ''}
+        ${clickable ? '<span style="margin-left:auto;font-size:.72rem;color:var(--primary);">상세 보기 ›</span>' : ''}
+      </div>
+      <div class="strategy-history-summary">${escHtml(summary)}</div>
+    </div>`;
+}
+
+function _renderStrategyHistory(apiItems) {
+  const listEl = document.getElementById('strategy-history-list');
+  const items  = apiItems || [];
+
+  let html = '';
+  if (_strategyLiveItem) {
+    html += _renderStrategyHistoryItem(_strategyLiveItem);
+  }
+  if (!items.length && !_strategyLiveItem) {
+    listEl.innerHTML = '<div class="strategy-empty">실행 이력이 없습니다.</div>';
+    return;
+  }
+  html += items.map(item => _renderStrategyHistoryItem({ ...item, status: item.status || 'completed' })).join('');
+  listEl.innerHTML = html;
 }
 
 document.getElementById('btn-strategy-run').addEventListener('click', async () => {
@@ -855,7 +993,15 @@ document.getElementById('btn-strategy-run').addEventListener('click', async () =
   btn.disabled = true;
   try {
     await API.post('/api/strategy/run', {});
-    _showStrategyStatus('전략 수립 시작...', 'running');
+    // 즉시 이력에 "실행 중" 항목 추가
+    _strategyLiveItem = {
+      run_at: new Date().toISOString(),
+      status: 'running',
+      dry_run: document.getElementById('chk-strategy-dry-run').checked,
+      sells: [], buys: [], summary: '',
+    };
+    _renderStrategyHistory([]);
+    _showStrategyStatus('전략 수립 진행 중...', 'running');
     if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 3000);
   } catch (e) {
     alert(e.message || '실행 실패');
@@ -864,8 +1010,8 @@ document.getElementById('btn-strategy-run').addEventListener('click', async () =
 });
 
 document.getElementById('btn-save-strategy-cfg').addEventListener('click', async () => {
-  const cron = document.getElementById('inp-strategy-cron').value.trim();
-  const dryRun = document.getElementById('chk-strategy-dry-run').checked;
+  const cron    = document.getElementById('inp-strategy-cron').value.trim();
+  const dryRun  = document.getElementById('chk-strategy-dry-run').checked;
   const enabled = document.getElementById('chk-strategy-enabled').checked;
   const statusEl = document.getElementById('strategy-cfg-status');
   if (!cron) { statusEl.textContent = 'Cron 표현식을 입력하세요.'; return; }
@@ -883,7 +1029,7 @@ document.getElementById('btn-save-strategy-cfg').addEventListener('click', async
 });
 
 document.getElementById('btn-strategy-history-refresh').addEventListener('click', () => {
-  _strategyPage = 1;
+  _strategyLiveItem = null;
   loadStrategyHistory(1);
 });
 
@@ -891,37 +1037,19 @@ async function loadStrategyHistory(page) {
   _strategyPage = page;
   const listEl = document.getElementById('strategy-history-list');
   const pagEl  = document.getElementById('strategy-pagination');
-  listEl.innerHTML = '<p class="text-muted" style="font-size:.8rem;">로딩 중...</p>';
+  if (!_strategyLiveItem) {
+    listEl.innerHTML = '<p class="text-muted" style="font-size:.8rem;">로딩 중...</p>';
+  }
   try {
     const data = await API.get(`/api/strategy/history?page=${page}&per_page=10`);
-    if (!data.items || !data.items.length) {
-      listEl.innerHTML = '<div class="strategy-empty">실행 이력이 없습니다.</div>';
-      pagEl.innerHTML = '';
-      return;
-    }
-
-    listEl.innerHTML = data.items.map((item, idx) => {
-      const dt = item.run_at ? formatKoreanDateTime(item.run_at) : '-';
-      const summary = trunc(item.summary || '요약 없음', 120);
-      const nSell = (item.sells || []).length;
-      const nBuy  = (item.buys  || []).length;
-      return `
-        <div class="strategy-history-item" onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})">
-          <div class="strategy-history-date">${escHtml(dt)}</div>
-          <div class="strategy-history-summary">${escHtml(summary)}</div>
-          <div class="strategy-history-meta">
-            ${item.dry_run ? '<span class="strategy-badge strategy-badge-dry">DRY</span>' : ''}
-            ${nSell > 0 ? `<span class="strategy-badge strategy-badge-sell">매도 ${nSell}</span>` : ''}
-            ${nBuy  > 0 ? `<span class="strategy-badge strategy-badge-buy">매수 ${nBuy}</span>`  : ''}
-          </div>
-        </div>`;
-    }).join('');
+    _renderStrategyHistory(data.items || []);
 
     // 페이지네이션
     if (data.total_pages > 1) {
       let pagHtml = '';
       if (page > 1) pagHtml += `<button onclick="loadStrategyHistory(${page - 1})">‹ 이전</button>`;
-      for (let p = 1; p <= data.total_pages; p++) {
+      const start = Math.max(1, page - 2), end = Math.min(data.total_pages, page + 2);
+      for (let p = start; p <= end; p++) {
         pagHtml += `<button class="${p === page ? 'active' : ''}" onclick="loadStrategyHistory(${p})">${p}</button>`;
       }
       if (page < data.total_pages) pagHtml += `<button onclick="loadStrategyHistory(${page + 1})">다음 ›</button>`;
@@ -937,6 +1065,7 @@ async function loadStrategyHistory(page) {
 
 function openStrategyDetail(itemJson) {
   const item = JSON.parse(itemJson);
+  if (item.status === 'running' || item.status === 'error') return;
   document.getElementById('strategy-modal-date').textContent = item.run_at ? formatKoreanDateTime(item.run_at) : '';
 
   const sectorsAdd    = (item.sectors_to_add    || []).map(s => `<span class="sector-tag add">${escHtml(s)}</span>`).join('');

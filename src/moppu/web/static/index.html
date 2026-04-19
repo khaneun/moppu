@@ -35,6 +35,7 @@
   <nav>
     <button class="tab active" data-tab="overview">종합 현황</button>
     <button class="tab" data-tab="agent">Agent</button>
+    <button class="tab" data-tab="pipeline">파이프라인</button>
     <button class="tab" data-tab="settings">설정</button>
   </nav>
 
@@ -74,109 +75,145 @@
 
     <!-- ========== Agent ========== -->
     <section id="tab-agent" class="tab-panel">
-      <div class="grid-agent">
-        <div class="card chat-card">
-          <div class="chat-header">
-            <h3>LSY Agent와의 대화</h3>
-            <button id="btn-view-prompt" class="btn btn-secondary btn-sm">프롬프트 보기</button>
-          </div>
-          <div id="suggested-questions" class="suggested-qs"></div>
-          <div id="chat-messages" class="messages"></div>
-          <form id="chat-form" class="chat-input-area">
-            <input type="text" id="chat-input" placeholder="질문을 입력하세요..." autocomplete="off">
-            <button type="submit" class="btn btn-primary" id="btn-send">전송</button>
-          </form>
+      <!-- LSY Chat (full width) -->
+      <div class="card chat-card" style="margin-bottom:14px;">
+        <div class="chat-header">
+          <h3>LSY Agent와의 대화</h3>
+          <button id="btn-view-prompt" class="btn btn-secondary btn-sm">프롬프트 보기</button>
         </div>
-
-        <div class="card pipeline-card">
-          <div class="pipeline-header">
-            <h3 style="margin-bottom:0;">파이프라인 현황</h3>
-            <div style="display:flex;gap:6px;">
-              <button id="btn-pipeline-refresh" class="btn btn-secondary btn-sm" title="새로고침">↻</button>
-              <button id="btn-pipeline-run" class="btn btn-primary btn-sm">▶ 실행</button>
-              <button id="btn-pipeline-log" class="btn btn-secondary btn-sm">로그</button>
-            </div>
-          </div>
-          <div id="pipeline-run-status" class="run-status" style="display:none;">
-            <span id="pipeline-run-msg" style="flex:1;"></span>
-            <button onclick="document.getElementById('pipeline-run-status').style.display='none';"
-                    style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 2px;">×</button>
-          </div>
-
-          <div class="pipeline-sub-cards">
-            <div class="sub-card">
-              <div class="sub-card-header">
-                <span class="sub-card-title">채널</span>
-                <button id="btn-edit-channels" class="btn-xs">편집</button>
-              </div>
-              <div id="sc-channels" class="sub-card-stat">-</div>
-              <div id="channel-list" class="channel-list" style="margin-top:6px;"></div>
-            </div>
-            <div class="sub-card">
-              <div class="sub-card-header">
-                <span class="sub-card-title">영상 목록</span>
-                <button id="btn-edit-lists" class="btn-xs">편집</button>
-              </div>
-              <div id="sc-videos" class="sub-card-stat">-</div>
-            </div>
-            <div class="sub-card">
-              <div class="sub-card-header">
-                <span class="sub-card-title">임베딩</span>
-              </div>
-              <div id="sc-embedding"></div>
-            </div>
-          </div>
-        </div>
+        <div id="suggested-questions" class="suggested-qs"></div>
+        <div id="chat-messages" class="messages"></div>
+        <form id="chat-form" class="chat-input-area">
+          <input type="text" id="chat-input" placeholder="질문을 입력하세요..." autocomplete="off">
+          <button type="submit" class="btn btn-primary" id="btn-send">전송</button>
+        </form>
       </div>
+
       <!-- 전략 수립가 -->
-      <div class="card strategy-card">
+      <div class="card">
+        <!-- 헤더 -->
         <div class="strategy-header">
-          <h3>전략 수립가</h3>
-          <div style="display:flex;gap:6px;align-items:center;">
-            <span id="strategy-dry-badge" class="badge" style="font-size:.65rem;"></span>
-            <button id="btn-strategy-run" class="btn btn-primary btn-sm">▶ 즉시 실행</button>
+          <div style="display:flex;align-items:center;gap:10px;">
+            <h3 style="margin:0;">전략 수립가</h3>
+            <span id="strategy-dry-badge" class="strategy-badge strategy-badge-dry" style="display:none;">DRY RUN</span>
           </div>
+          <button id="btn-strategy-run" class="btn btn-primary btn-sm">▶ 즉시 실행</button>
         </div>
 
-        <div id="strategy-run-status" class="run-status" style="display:none;">
-          <span id="strategy-run-msg" style="flex:1;"></span>
+        <!-- 실행 상태 배너 -->
+        <div id="strategy-run-status" class="run-status" style="display:none;margin-top:10px;">
+          <span id="strategy-run-msg" style="flex:1;font-size:.82rem;"></span>
           <button onclick="document.getElementById('strategy-run-status').style.display='none';"
-                  style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 2px;">×</button>
+                  style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 4px;">×</button>
         </div>
 
         <!-- 스케줄 설정 -->
-        <div class="strategy-config-row">
-          <div class="strategy-config-fields">
-            <div class="form-group" style="margin:0;">
-              <label style="font-size:.72rem;">Cron 스케줄 <span style="color:var(--text-muted);">(평일 09:30 예시: 30 9 * * 1-5)</span></label>
+        <div class="strategy-config-panel">
+          <div class="strategy-config-title">스케줄 설정</div>
+          <div class="strategy-config-grid">
+            <div class="form-group" style="margin:0;grid-column:1/-1;">
+              <label style="font-size:.72rem;">Cron 표현식
+                <span style="color:var(--text-muted);font-weight:400;">&nbsp;평일 09:30 → <code>30 9 * * 1-5</code></span>
+              </label>
               <input type="text" id="inp-strategy-cron" placeholder="30 9 * * 1-5">
             </div>
-            <div style="display:flex;align-items:center;gap:8px;margin-top:4px;">
-              <label style="font-size:.72rem;color:var(--text-muted);">Dry Run</label>
+            <div class="strategy-toggle-row">
+              <span class="strategy-toggle-label">Dry Run</span>
               <label class="switch">
                 <input type="checkbox" id="chk-strategy-dry-run" checked>
                 <span class="slider"></span>
               </label>
-              <label style="font-size:.72rem;color:var(--text-muted);margin-left:8px;">활성화</label>
+            </div>
+            <div class="strategy-toggle-row">
+              <span class="strategy-toggle-label">스케줄 활성화</span>
               <label class="switch">
                 <input type="checkbox" id="chk-strategy-enabled">
                 <span class="slider"></span>
               </label>
             </div>
+            <button id="btn-save-strategy-cfg" class="btn btn-secondary btn-sm strategy-save-btn">저장</button>
           </div>
-          <button id="btn-save-strategy-cfg" class="btn btn-secondary btn-sm" style="align-self:flex-end;">저장</button>
+          <p id="strategy-cfg-status" style="font-size:.72rem;margin-top:6px;min-height:1em;color:var(--text-muted);"></p>
         </div>
-        <p id="strategy-cfg-status" class="text-muted" style="font-size:.72rem;margin-top:4px;min-height:1em;"></p>
 
         <!-- 실행 이력 -->
-        <div style="margin-top:14px;border-top:1px solid var(--border);padding-top:12px;">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
-            <h4 style="margin:0;">실행 이력</h4>
-            <button id="btn-strategy-history-refresh" class="btn btn-secondary btn-sm" title="새로고침">↻</button>
+        <div class="strategy-history-section">
+          <div class="strategy-history-header">
+            <span class="strategy-history-title">실행 이력</span>
+            <button id="btn-strategy-history-refresh" class="btn btn-secondary btn-sm">↻</button>
           </div>
           <div id="strategy-history-list"></div>
           <div id="strategy-pagination" class="pagination-row"></div>
         </div>
+      </div>
+    </section>
+
+    <!-- ========== 파이프라인 ========== -->
+    <section id="tab-pipeline" class="tab-panel">
+      <!-- 파이프라인 제어 -->
+      <div class="card" style="margin-bottom:14px;">
+        <div class="pipeline-header">
+          <h3 style="margin-bottom:0;">파이프라인 현황</h3>
+          <div style="display:flex;gap:6px;">
+            <button id="btn-pipeline-refresh" class="btn btn-secondary btn-sm" title="새로고침">↻</button>
+            <button id="btn-pipeline-run" class="btn btn-primary btn-sm">▶ 실행</button>
+            <button id="btn-pipeline-log" class="btn btn-secondary btn-sm">로그</button>
+          </div>
+        </div>
+        <div id="pipeline-run-status" class="run-status" style="display:none;">
+          <span id="pipeline-run-msg" style="flex:1;"></span>
+          <button onclick="document.getElementById('pipeline-run-status').style.display='none';"
+                  style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 2px;">×</button>
+        </div>
+
+        <div class="pipeline-sub-cards">
+          <div class="sub-card">
+            <div class="sub-card-header">
+              <span class="sub-card-title">채널</span>
+              <button id="btn-edit-channels" class="btn-xs">편집</button>
+            </div>
+            <div id="sc-channels" class="sub-card-stat">-</div>
+            <div id="channel-list" class="channel-list" style="margin-top:6px;"></div>
+          </div>
+          <div class="sub-card">
+            <div class="sub-card-header">
+              <span class="sub-card-title">영상 목록</span>
+              <button id="btn-edit-lists" class="btn-xs">편집</button>
+            </div>
+            <div id="sc-videos" class="sub-card-stat">-</div>
+          </div>
+          <div class="sub-card">
+            <div class="sub-card-header">
+              <span class="sub-card-title">임베딩</span>
+            </div>
+            <div id="sc-embedding"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 수집 이력 테이블 -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <h3 style="margin:0;">수집 이력</h3>
+          <button id="btn-ingest-history-refresh" class="btn btn-secondary btn-sm">↻</button>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>수집일시</th>
+                <th>제목</th>
+                <th>출처</th>
+                <th>상태</th>
+                <th>영상</th>
+              </tr>
+            </thead>
+            <tbody id="ingest-history-body">
+              <tr><td colspan="5" class="text-muted">로딩 중...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="ingest-pagination" class="pagination-row" style="margin-top:12px;"></div>
       </div>
     </section>
 
