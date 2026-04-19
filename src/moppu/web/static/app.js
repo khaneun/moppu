@@ -871,6 +871,7 @@ async function loadCost() {
 let _strategyPage = 1;
 let _strategyPolling = null;
 let _strategyLiveItem = null;   // 실행 중인 항목 (optimistic)
+let _strategyRows = [];         // 클릭 핸들러용 — 매 렌더 시 초기화
 
 async function loadStrategyConfig() {
   try {
@@ -960,9 +961,12 @@ function _renderStrategyHistoryRow(item) {
     : '<span class="strategy-badge strategy-badge-sell">실거래</span>';
 
   const clickable = isCompleted;
-  const trAttrs = clickable
-    ? `data-strategy-json="${escHtml(JSON.stringify(item))}" class="clickable-row"`
-    : '';
+  let trAttrs = '';
+  if (clickable) {
+    const idx = _strategyRows.length;
+    _strategyRows.push(item);
+    trAttrs = `data-strategy-idx="${idx}" class="clickable-row"`;
+  }
 
   return `<tr ${trAttrs}>
     <td style="font-size:.78rem;">${dt}</td>
@@ -974,6 +978,7 @@ function _renderStrategyHistoryRow(item) {
 function _renderStrategyHistory(apiItems) {
   const tbody = document.getElementById('strategy-history-body');
   if (!tbody) return;
+  _strategyRows = [];
   const items = apiItems || [];
 
   let rows = '';
@@ -1054,8 +1059,10 @@ document.getElementById('btn-strategy-history-refresh').addEventListener('click'
 });
 
 document.getElementById('strategy-history-body').addEventListener('click', (e) => {
-  const tr = e.target.closest('tr[data-strategy-json]');
-  if (tr) openStrategyDetail(tr.dataset.strategyJson);
+  const tr = e.target.closest('tr[data-strategy-idx]');
+  if (!tr) return;
+  const item = _strategyRows[+tr.dataset.strategyIdx];
+  if (item) openStrategyDetail(JSON.stringify(item));
 });
 
 async function loadStrategyHistory(page) {
