@@ -171,7 +171,7 @@ class TelegramConfig(BaseModel):
 
 class SchedulerConfig(BaseModel):
     enabled: bool = True
-    poll_channels_cron: str = "*/15 * * * *"
+    poll_channels_cron: str = "0 15 * * *"
     # Cron for the upload_day job — runs at midnight, ingests channels whose
     # upload_day matches yesterday's date.
     upload_day_cron: str = "0 0 * * *"

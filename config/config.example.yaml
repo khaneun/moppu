@@ -79,7 +79,7 @@ telegram:
 scheduler:
   # If true, run APScheduler loop in-process.
   enabled: true
-  poll_channels_cron: "*/15 * * * *"
+  poll_channels_cron: "0 15 * * *"
 
 strategy_planner:
   # 전략 수립가 활성화 (false로 시작하고 검증 후 true로 변경하세요)
