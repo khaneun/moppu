@@ -851,6 +851,40 @@ def ingestion_history(page: int = 1, per_page: int = 10):
     }
 
 
+@app.get("/api/pipeline/video/{video_id}")
+def get_video_detail(video_id: str, request: Request):
+    _require_auth(request)
+    assert _rt is not None
+    with _rt.session_factory() as s:
+        v = s.query(Video).filter(Video.video_id == video_id).one_or_none()
+        if not v:
+            raise HTTPException(404, "Video not found")
+        ch_name = None
+        if v.channel_fk:
+            ch = s.query(Channel).filter_by(id=v.channel_fk).one_or_none()
+            ch_name = ch.name if ch else None
+        n_chunks = 0
+        transcript_preview: str | None = None
+        if v.transcript:
+            chunks = sorted(v.transcript.chunks, key=lambda c: c.chunk_index)
+            n_chunks = len(chunks)
+            if chunks:
+                transcript_preview = chunks[0].text[:800]
+        return {
+            "video_id": v.video_id,
+            "title": v.title,
+            "url": v.url or f"https://www.youtube.com/watch?v={v.video_id}",
+            "source_type": v.source_type,
+            "channel_name": ch_name,
+            "status": v.status,
+            "error": v.error,
+            "created_at": v.created_at.isoformat() if v.created_at else None,
+            "published_at": v.published_at.isoformat() if v.published_at else None,
+            "n_chunks": n_chunks,
+            "transcript_preview": transcript_preview,
+        }
+
+
 # -------------------------------------------------------------------- #
 # Strategy Planner                                                      #
 # -------------------------------------------------------------------- #

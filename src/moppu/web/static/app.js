@@ -455,35 +455,18 @@ async function loadIngestionHistory(page) {
   try {
     const data = await API.get(`/api/pipeline/ingestion-history?page=${page}&per_page=10`);
     if (!data.items || !data.items.length) {
-      tbody.innerHTML = '<tr><td colspan="5" class="text-muted" style="text-align:center;padding:20px;">수집 이력이 없습니다.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="2" class="text-muted" style="text-align:center;padding:20px;">수집 이력이 없습니다.</td></tr>';
       pagEl.innerHTML = '';
       return;
     }
 
-    const statusBadge = (s, err) => {
-      if (s === 'embedded')    return '<span class="ingest-badge ingest-badge-embedded">임베딩 완료</span>';
-      if (s === 'failed')      return `<span class="ingest-badge ingest-badge-failed" title="${escHtml(err||'')}">실패</span>`;
-      return '<span class="ingest-badge ingest-badge-pending">대기</span>';
-    };
-
-    const sourceLabel = (src) => {
-      if (!src) return '-';
-      if (src.startsWith('list:')) return src.replace('list:', '목록: ');
-      return '채널';
-    };
-
     tbody.innerHTML = data.items.map(v => {
       const dt = v.created_at ? formatDateTimeTwoLine(v.created_at) : '-';
-      const url = v.url || `https://www.youtube.com/watch?v=${v.video_id}`;
-      const title = trunc(v.title || v.video_id, 42);
-      const src = v.channel_name ? escHtml(trunc(v.channel_name, 16)) : escHtml(sourceLabel(v.source_type));
-      return `<tr>
-        <td style="font-size:.76rem;">${dt}</td>
-        <td><a href="${escHtml(url)}" target="_blank" style="color:var(--text);text-decoration:none;font-size:.82rem;" title="${escHtml(v.title||'')}">
-          ${escHtml(title)}</a></td>
-        <td style="font-size:.76rem;color:var(--text-muted);">${src}</td>
-        <td>${statusBadge(v.status, v.error)}</td>
-        <td><a href="${escHtml(url)}" target="_blank" style="font-size:.72rem;color:var(--primary);">▶</a></td>
+      const title = trunc(v.title || v.video_id, 48);
+      const vidJson = JSON.stringify(JSON.stringify(v));
+      return `<tr class="clickable-row" onclick="openIngestDetail(${vidJson})">
+        <td style="font-size:.76rem;width:140px;">${dt}</td>
+        <td style="font-size:.82rem;">${escHtml(title)}</td>
       </tr>`;
     }).join('');
 
@@ -501,7 +484,7 @@ async function loadIngestionHistory(page) {
       pagEl.innerHTML = '';
     }
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="5" class="text-warn">${escHtml(e.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="2" class="text-warn">${escHtml(e.message)}</td></tr>`;
     pagEl.innerHTML = '';
   }
 }
@@ -1148,6 +1131,72 @@ function openStrategyDetail(itemJson) {
 document.getElementById('strategy-modal').addEventListener('click', (e) => {
   if (e.target === document.getElementById('strategy-modal')) closeModal('strategy-modal');
 });
+
+document.getElementById('ingest-detail-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('ingest-detail-modal')) closeModal('ingest-detail-modal');
+});
+
+async function openIngestDetail(videoJson) {
+  const v = JSON.parse(videoJson);
+  const modal = document.getElementById('ingest-detail-modal');
+  const body  = document.getElementById('ingest-modal-body');
+  const dateEl = document.getElementById('ingest-modal-date');
+
+  dateEl.textContent = v.created_at ? formatKoreanDateTime(v.created_at) : '';
+  body.innerHTML = '<div class="modal-loading">로딩 중</div>';
+  modal.style.display = 'flex';
+
+  try {
+    const d = await API.get(`/api/pipeline/video/${encodeURIComponent(v.video_id)}`);
+    const url = d.url || `https://www.youtube.com/watch?v=${d.video_id}`;
+
+    const sourceLabel = d.channel_name
+      ? escHtml(d.channel_name)
+      : d.source_type?.startsWith('list:')
+        ? escHtml(d.source_type.replace('list:', '목록: '))
+        : '채널';
+
+    const statusHtml = d.status === 'embedded'
+      ? '<span class="ingest-badge ingest-badge-embedded">임베딩 완료</span>'
+      : d.status === 'failed'
+        ? `<span class="ingest-badge ingest-badge-failed">실패</span>${d.error ? `<p class="text-warn" style="font-size:.78rem;margin-top:6px;">${escHtml(d.error)}</p>` : ''}`
+        : '<span class="ingest-badge ingest-badge-pending">대기</span>';
+
+    const chunksInfo = d.n_chunks > 0
+      ? `<span style="font-size:.75rem;color:var(--text-muted);margin-left:8px;">(청크 ${d.n_chunks}개 임베딩됨)</span>`
+      : '';
+
+    const transcriptHtml = d.transcript_preview
+      ? `<div style="background:var(--bg-2);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:.82rem;line-height:1.7;color:#cbd5e1;max-height:260px;overflow-y:auto;white-space:pre-wrap;">${escHtml(d.transcript_preview)}${d.n_chunks > 1 ? '\n\n…(이하 생략)' : ''}</div>`
+      : '<p class="text-muted" style="font-size:.82rem;">트랜스크립트 없음</p>';
+
+    body.innerHTML = `
+      <div style="margin-bottom:16px;">
+        <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">제목</p>
+        <p style="font-size:.92rem;font-weight:600;line-height:1.5;">${escHtml(d.title || d.video_id)}</p>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px;">
+        <div>
+          <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">출처</p>
+          <p style="font-size:.85rem;">${sourceLabel}</p>
+        </div>
+        <div>
+          <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">상태</p>
+          <div style="display:flex;align-items:center;flex-wrap:wrap;">${statusHtml}${chunksInfo}</div>
+        </div>
+      </div>
+      <div style="margin-bottom:16px;">
+        <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">영상</p>
+        <a href="${escHtml(url)}" target="_blank" style="color:var(--primary);font-size:.85rem;word-break:break-all;">${escHtml(url)}</a>
+      </div>
+      <div>
+        <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">트랜스크립트 미리보기 <span style="font-weight:400;text-transform:none;">(1번 청크)</span></p>
+        ${transcriptHtml}
+      </div>`;
+  } catch (e) {
+    body.innerHTML = `<p class="text-warn">${escHtml(e.message)}</p>`;
+  }
+}
 
 // ================================================================== //
 // Init

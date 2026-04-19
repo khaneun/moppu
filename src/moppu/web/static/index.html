@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Moppu Monitor</title>
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=7">
+  <link rel="stylesheet" href="/static/style.css?v=8">
 </head>
 <body>
 
@@ -185,15 +185,12 @@
           <table>
             <thead>
               <tr>
-                <th>수집일시</th>
+                <th style="width:140px;">수집일시</th>
                 <th>제목</th>
-                <th>출처</th>
-                <th>상태</th>
-                <th>영상</th>
               </tr>
             </thead>
             <tbody id="ingest-history-body">
-              <tr><td colspan="5" class="text-muted">로딩 중...</td></tr>
+              <tr><td colspan="2" class="text-muted">로딩 중...</td></tr>
             </tbody>
           </table>
         </div>
@@ -377,6 +374,22 @@
     </div>
   </div>
 
+  <!-- ===== Ingest Detail Modal ===== -->
+  <div id="ingest-detail-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <div>
+          <span class="modal-date" id="ingest-modal-date"></span>
+          <h3 style="margin:0;color:#e2e8f0;">수집 영상 상세</h3>
+        </div>
+        <button class="modal-close" onclick="closeModal('ingest-detail-modal')">&times;</button>
+      </div>
+      <div class="modal-body" id="ingest-modal-body">
+        <div class="modal-loading">로딩 중</div>
+      </div>
+    </div>
+  </div>
+
   <!-- ===== Pipeline Log Modal ===== -->
   <div id="log-modal" class="modal-overlay" style="display:none;">
     <div class="modal modal-wide">
@@ -391,6 +404,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=7"></script>
+  <script src="/static/app.js?v=8"></script>
 </body>
 </html>
