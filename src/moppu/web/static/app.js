@@ -990,19 +990,27 @@ function _renderStrategyHistory(apiItems) {
 document.getElementById('btn-strategy-run').addEventListener('click', async () => {
   const btn = document.getElementById('btn-strategy-run');
   btn.disabled = true;
+
+  // API 응답 전에 즉시 "실행 중" 항목을 이력에 표시
+  const dryChk = document.getElementById('chk-strategy-dry-run');
+  _strategyLiveItem = {
+    run_at: new Date().toISOString(),
+    status: 'running',
+    dry_run: dryChk ? dryChk.checked : true,
+    sells: [], buys: [], summary: '',
+  };
+  _renderStrategyHistory([]);
   _showStrategyStatus('전략 수립 요청 중...', 'running');
+
   try {
     await API.post('/api/strategy/run', {});
-    _strategyLiveItem = {
-      run_at: new Date().toISOString(),
-      status: 'running',
-      dry_run: document.getElementById('chk-strategy-dry-run') ? document.getElementById('chk-strategy-dry-run').checked : true,
-      sells: [], buys: [], summary: '',
-    };
-    _renderStrategyHistory([]);
     _showStrategyStatus('전략 수립 진행 중...', 'running');
     if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 3000);
   } catch (e) {
+    // API 실패 시 live item을 오류 상태로 전환
+    _strategyLiveItem.status = 'error';
+    _strategyLiveItem.error = e.message || '실행 요청 실패';
+    _renderStrategyHistory([]);
     _showStrategyStatus(e.message || '실행 요청 실패', 'error');
   }
   btn.disabled = false;

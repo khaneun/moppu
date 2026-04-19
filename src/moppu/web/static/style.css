@@ -1082,6 +1082,15 @@ input:checked + .slider::before { transform: translateX(20px); background: #fff;
   align-items: center;
   justify-content: space-between;
   margin-bottom: 14px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.strategy-btn-group {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 
