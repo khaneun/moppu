@@ -850,7 +850,7 @@ async function loadCost() {
     tbody.innerHTML = data.recent_entries && data.recent_entries.length
       ? data.recent_entries.slice().reverse().map(e => {
           if (!e || !e.ts) return '';
-          const t = new Date(e.ts).toLocaleString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+          const t = new Date(e.ts).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
           return `<tr><td>${t}</td><td>${e.provider}/${trunc(e.model, 15)}</td><td>${e.input_tokens.toLocaleString()}</td><td>${e.output_tokens.toLocaleString()}</td><td>${usd(e.cost_usd)}</td></tr>`;
         }).join('')
       : '<tr><td colspan="5" class="text-muted">아직 LLM 호출 내역이 없습니다. Agent 대화 또는 요약 생성 후 표시됩니다.</td></tr>';

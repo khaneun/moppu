@@ -163,6 +163,15 @@ class StrategyPlannerAgent:
         history.append({"role": "assistant", "content": sector_analysis})
         log.info("strategy_planner.sector_analysis_done")
 
+        # usage 누적 (비용 집계용)
+        _acc_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
+
+        def _add_usage(u: dict) -> None:
+            _acc_usage["input_tokens"]  += u.get("input_tokens",  0)
+            _acc_usage["output_tokens"] += u.get("output_tokens", 0)
+
+        _add_usage(sector_result.get("usage") or {})
+
         # 3. LSY Turn 2 — 구체적 종목 후보
         candidate_prompt = (
             "위 분석에서 추천한 섹터의 구체적인 매수 종목 후보를 5개 이내로 추천해주세요.\n"
@@ -173,11 +182,13 @@ class StrategyPlannerAgent:
         candidate_text = candidate_result["text"]
         history.append({"role": "user", "content": candidate_prompt})
         history.append({"role": "assistant", "content": candidate_text})
+        _add_usage(candidate_result.get("usage") or {})
         log.info("strategy_planner.candidates_done")
 
         # 4. LSY Turn 3 — 종목 코드 JSON 추출
         ticker_result = self._trader.chat(_TICKER_EXTRACT_PROMPT, history=history)
         tickers = _parse_ticker_json(ticker_result["text"])
+        _add_usage(ticker_result.get("usage") or {})
         buy_tickers: list[str] = tickers.get("buy", [])
         sell_tickers_from_lsy: list[str] = tickers.get("sell", [])
         log.info("strategy_planner.tickers_extracted", buy=buy_tickers, sell=sell_tickers_from_lsy)
@@ -187,7 +198,7 @@ class StrategyPlannerAgent:
         quotes = self._fetch_quotes(all_tickers)
 
         # 6. 전략 수립가 LLM — 최종 계획 수립
-        plan = self._build_plan(
+        plan, plan_usage = self._build_plan(
             portfolio_text=portfolio_text,
             sector_analysis=sector_analysis,
             candidate_text=candidate_text,
@@ -196,6 +207,7 @@ class StrategyPlannerAgent:
             cash=cash,
             positions=positions,
         )
+        _add_usage(plan_usage)
         log.info(
             "strategy_planner.plan_built",
             n_sells=len(plan.sells),
@@ -215,7 +227,13 @@ class StrategyPlannerAgent:
         # 9. Telegram 완료 알림
         self._notify_completion(plan, results)
 
-        return {"plan": plan.model_dump(), "results": results}
+        return {
+            "plan": plan.model_dump(),
+            "results": results,
+            "usage": _acc_usage,
+            "provider": self._llm.name,
+            "model": self._llm.model,
+        }
 
     # ── 계획 수립 ─────────────────────────────────────────────────────────
 
@@ -289,7 +307,7 @@ class StrategyPlannerAgent:
         shortfall = plan.total_buy_krw - cash - sell_proceeds
         plan.needs_additional_krw = max(0.0, shortfall)
 
-        return plan
+        return plan, resp.usage or {}
 
     # ── 자금 요청 ─────────────────────────────────────────────────────────
 

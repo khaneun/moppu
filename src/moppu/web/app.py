@@ -955,6 +955,12 @@ def run_strategy():
             # broker 미설정 등 오류를 반환값으로 전달하는 경우
             if result.get("error"):
                 raise ValueError(result["error"])
+            if result.get("usage"):
+                _log_token_usage(
+                    result.get("provider", _rt.cfg.llm.provider),
+                    result.get("model", _rt.cfg.llm.model),
+                    result["usage"],
+                )
             n_sells = len((result.get("plan") or {}).get("sells", []))
             n_buys = len((result.get("plan") or {}).get("buys", []))
             _strategy_run_msg = f"완료 — 매도 {n_sells}건 / 매수 {n_buys}건"
