@@ -97,7 +97,10 @@
             <h3 style="margin:0;">전략 수립가</h3>
             <span id="strategy-dry-badge" class="strategy-badge strategy-badge-dry" style="display:none;">DRY RUN</span>
           </div>
-          <button id="btn-strategy-run" class="btn btn-primary btn-sm">▶ 즉시 실행</button>
+          <div style="display:flex;gap:8px;">
+            <button id="btn-strategy-schedule" class="btn btn-secondary btn-sm">⚙ 스케줄 설정</button>
+            <button id="btn-strategy-run" class="btn btn-primary btn-sm">▶ 즉시 실행</button>
+          </div>
         </div>
 
         <!-- 실행 상태 배너 -->
@@ -105,35 +108,6 @@
           <span id="strategy-run-msg" style="flex:1;font-size:.82rem;"></span>
           <button onclick="document.getElementById('strategy-run-status').style.display='none';"
                   style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 4px;">×</button>
-        </div>
-
-        <!-- 스케줄 설정 -->
-        <div class="strategy-config-panel">
-          <div class="strategy-config-title">스케줄 설정</div>
-          <div class="strategy-config-grid">
-            <div class="form-group" style="margin:0;grid-column:1/-1;">
-              <label style="font-size:.72rem;">Cron 표현식
-                <span style="color:var(--text-muted);font-weight:400;">&nbsp;평일 09:30 → <code>30 9 * * 1-5</code></span>
-              </label>
-              <input type="text" id="inp-strategy-cron" placeholder="30 9 * * 1-5">
-            </div>
-            <div class="strategy-toggle-row">
-              <span class="strategy-toggle-label">Dry Run</span>
-              <label class="switch">
-                <input type="checkbox" id="chk-strategy-dry-run" checked>
-                <span class="slider"></span>
-              </label>
-            </div>
-            <div class="strategy-toggle-row">
-              <span class="strategy-toggle-label">스케줄 활성화</span>
-              <label class="switch">
-                <input type="checkbox" id="chk-strategy-enabled">
-                <span class="slider"></span>
-              </label>
-            </div>
-            <button id="btn-save-strategy-cfg" class="btn btn-secondary btn-sm strategy-save-btn">저장</button>
-          </div>
-          <p id="strategy-cfg-status" style="font-size:.72rem;margin-top:6px;min-height:1em;color:var(--text-muted);"></p>
         </div>
 
         <!-- 실행 이력 -->
@@ -342,6 +316,40 @@
         </div>
       </div>
       <div class="modal-body" id="app-log-body"></div>
+    </div>
+  </div>
+
+  <!-- ===== Strategy Schedule Modal ===== -->
+  <div id="strategy-schedule-modal" class="modal-overlay" style="display:none;">
+    <div class="modal" style="max-width:480px;">
+      <div class="modal-header">
+        <h3 style="margin:0;color:#e2e8f0;">전략 수립가 — 스케줄 설정</h3>
+        <button class="modal-close" onclick="closeModal('strategy-schedule-modal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-group">
+          <label>Cron 표현식
+            <span style="color:var(--text-muted);font-weight:400;text-transform:none;">&nbsp;예) 평일 09:30 → <code>30 9 * * 1-5</code></span>
+          </label>
+          <input type="text" id="inp-strategy-cron" placeholder="30 9 * * 1-5">
+        </div>
+        <div class="setting-row" style="margin-bottom:14px;">
+          <span style="font-size:.88rem;">Dry Run</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-strategy-dry-run" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="setting-row" style="margin-bottom:20px;">
+          <span style="font-size:.88rem;">스케줄 활성화</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-strategy-enabled">
+            <span class="slider"></span>
+          </label>
+        </div>
+        <button id="btn-save-strategy-cfg" class="btn btn-primary" style="width:100%;">저장</button>
+        <p id="strategy-cfg-status" style="font-size:.76rem;margin-top:10px;min-height:1em;color:var(--text-muted);text-align:center;"></p>
+      </div>
     </div>
   </div>
 

@@ -928,12 +928,33 @@ def run_strategy():
             data_dir=_rt.cfg.app.data_dir,
         )
 
+    def _save_error(err_str: str) -> None:
+        try:
+            hist_dir = _strategy_history_dir()
+            hist_dir.mkdir(parents=True, exist_ok=True)
+            from datetime import datetime as _dt
+            ts = _dt.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
+            (hist_dir / f"{ts}.json").write_text(
+                json.dumps({
+                    "run_at": _dt.now(KST).isoformat(),
+                    "dry_run": planner._cfg.dry_run,  # noqa: SLF001
+                    "error": err_str,
+                    "plan": {"sells": [], "buys": [], "summary": f"실행 실패: {err_str}"},
+                    "results": [],
+                }, ensure_ascii=False)
+            )
+        except Exception:
+            pass
+
     def _run() -> None:
         global _strategy_running, _strategy_run_msg
         _strategy_running = True
         _strategy_run_msg = "전략 수립 시작..."
         try:
             result = planner.run()
+            # broker 미설정 등 오류를 반환값으로 전달하는 경우
+            if result.get("error"):
+                raise ValueError(result["error"])
             n_sells = len((result.get("plan") or {}).get("sells", []))
             n_buys = len((result.get("plan") or {}).get("buys", []))
             _strategy_run_msg = f"완료 — 매도 {n_sells}건 / 매수 {n_buys}건"
@@ -941,23 +962,7 @@ def run_strategy():
             err_str = str(e)
             _strategy_run_msg = f"오류: {err_str}"
             log.error("web.strategy_run_failed", err=err_str)
-            # 실패 이력도 저장
-            try:
-                hist_dir = _strategy_history_dir()
-                hist_dir.mkdir(parents=True, exist_ok=True)
-                from datetime import datetime as _dt
-                ts = _dt.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
-                (hist_dir / f"{ts}.json").write_text(
-                    json.dumps({
-                        "run_at": _dt.now(KST).isoformat(),
-                        "dry_run": planner._cfg.dry_run,  # noqa: SLF001
-                        "error": err_str,
-                        "plan": {"sells": [], "buys": [], "summary": f"실행 실패: {err_str}"},
-                        "results": [],
-                    }, ensure_ascii=False)
-                )
-            except Exception:
-                pass
+            _save_error(err_str)
         finally:
             _strategy_running = False
 

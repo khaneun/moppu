@@ -1084,46 +1084,6 @@ input:checked + .slider::before { transform: translateX(20px); background: #fff;
   margin-bottom: 14px;
 }
 
-.strategy-config-panel {
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 12px 14px;
-  margin-bottom: 4px;
-}
-
-.strategy-config-title {
-  font-size: .7rem;
-  font-weight: 700;
-  color: var(--text-muted);
-  text-transform: uppercase;
-  letter-spacing: .06em;
-  margin-bottom: 10px;
-}
-
-.strategy-config-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr auto;
-  gap: 8px;
-  align-items: end;
-}
-
-.strategy-toggle-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-bottom: 6px;
-}
-
-.strategy-toggle-label {
-  font-size: .78rem;
-  color: var(--text-muted);
-  white-space: nowrap;
-}
-
-.strategy-save-btn {
-  white-space: nowrap;
-}
 
 .strategy-history-section {
   margin-top: 16px;

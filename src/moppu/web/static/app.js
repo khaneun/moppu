@@ -988,25 +988,32 @@ function _renderStrategyHistory(apiItems) {
 }
 
 document.getElementById('btn-strategy-run').addEventListener('click', async () => {
-  if (!confirm('전략 수립가를 즉시 실행합니다.\nLSY Agent에게 섹터 분석·종목 추천을 요청하고 포트폴리오 계획을 수립합니다.\n\n계속하시겠습니까?')) return;
   const btn = document.getElementById('btn-strategy-run');
   btn.disabled = true;
+  _showStrategyStatus('전략 수립 요청 중...', 'running');
   try {
     await API.post('/api/strategy/run', {});
-    // 즉시 이력에 "실행 중" 항목 추가
     _strategyLiveItem = {
       run_at: new Date().toISOString(),
       status: 'running',
-      dry_run: document.getElementById('chk-strategy-dry-run').checked,
+      dry_run: document.getElementById('chk-strategy-dry-run') ? document.getElementById('chk-strategy-dry-run').checked : true,
       sells: [], buys: [], summary: '',
     };
     _renderStrategyHistory([]);
     _showStrategyStatus('전략 수립 진행 중...', 'running');
     if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 3000);
   } catch (e) {
-    alert(e.message || '실행 실패');
+    _showStrategyStatus(e.message || '실행 요청 실패', 'error');
   }
   btn.disabled = false;
+});
+
+document.getElementById('btn-strategy-schedule').addEventListener('click', () => {
+  document.getElementById('strategy-schedule-modal').style.display = 'flex';
+});
+
+document.getElementById('strategy-schedule-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('strategy-schedule-modal')) closeModal('strategy-schedule-modal');
 });
 
 document.getElementById('btn-save-strategy-cfg').addEventListener('click', async () => {
@@ -1018,10 +1025,14 @@ document.getElementById('btn-save-strategy-cfg').addEventListener('click', async
   statusEl.textContent = '저장 중...';
   try {
     await API.post('/api/strategy/config', { cron, dry_run: dryRun, enabled });
-    statusEl.textContent = `✓ 저장됨 — ${cron}`;
+    statusEl.textContent = `✓ 저장됨`;
     statusEl.style.color = 'var(--success)';
     loadStrategyConfig();
-    setTimeout(() => { statusEl.textContent = ''; statusEl.style.color = ''; }, 3000);
+    setTimeout(() => {
+      closeModal('strategy-schedule-modal');
+      statusEl.textContent = '';
+      statusEl.style.color = '';
+    }, 1200);
   } catch (e) {
     statusEl.textContent = '저장 실패: ' + e.message;
     statusEl.style.color = 'var(--danger)';
