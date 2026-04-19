@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Moppu Monitor</title>
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=5">
 </head>
 <body>
 
@@ -89,36 +89,50 @@
         </form>
       </div>
 
-      <!-- 전략 수립가 -->
-      <div class="card">
-        <!-- 헤더 -->
+      <!-- 전략 수립가 컨트롤 -->
+      <div class="card" style="margin-bottom:14px;">
         <div class="strategy-header">
-          <div style="display:flex;align-items:center;gap:10px;">
-            <h3 style="margin:0;">전략 수립가</h3>
-            <span id="strategy-dry-badge" class="strategy-badge strategy-badge-dry" style="display:none;">DRY RUN</span>
+          <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+            <h3 style="margin:0;white-space:nowrap;">전략 수립가</h3>
+            <span id="strategy-dry-badge" class="strategy-badge strategy-badge-dry" style="display:none;flex-shrink:0;">DRY RUN</span>
           </div>
           <div class="strategy-btn-group">
-            <button id="btn-strategy-schedule" class="btn btn-secondary btn-sm">⚙ 스케줄 설정</button>
+            <button id="btn-strategy-schedule" class="btn btn-secondary btn-sm">⚙ 스케줄</button>
             <button id="btn-strategy-run" class="btn btn-primary btn-sm">▶ 즉시 실행</button>
           </div>
         </div>
-
-        <!-- 실행 상태 배너 -->
-        <div id="strategy-run-status" class="run-status" style="display:none;margin-top:10px;">
+        <div id="strategy-run-status" class="run-status" style="display:none;">
           <span id="strategy-run-msg" style="flex:1;font-size:.82rem;"></span>
           <button onclick="document.getElementById('strategy-run-status').style.display='none';"
                   style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 4px;">×</button>
         </div>
+      </div>
 
-        <!-- 실행 이력 -->
-        <div class="strategy-history-section">
-          <div class="strategy-history-header">
-            <span class="strategy-history-title">실행 이력</span>
-            <button id="btn-strategy-history-refresh" class="btn btn-secondary btn-sm">↻</button>
-          </div>
-          <div id="strategy-history-list"></div>
-          <div id="strategy-pagination" class="pagination-row"></div>
+      <!-- 전략 수립 이력 -->
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
+          <h3 style="margin:0;">전략 수립 이력</h3>
+          <button id="btn-strategy-history-refresh" class="btn btn-secondary btn-sm">↻</button>
         </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>실행일시</th>
+                <th>상태</th>
+                <th>모드</th>
+                <th>매도</th>
+                <th>매수</th>
+                <th>요약</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="strategy-history-body">
+              <tr><td colspan="7" class="text-muted" style="text-align:center;padding:20px;">로딩 중...</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div id="strategy-pagination" class="pagination-row" style="margin-top:12px;"></div>
       </div>
     </section>
 
@@ -381,6 +395,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

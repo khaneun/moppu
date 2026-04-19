@@ -935,56 +935,60 @@ function _showStrategyStatus(msg, state) {
     : escHtml(msg);
 }
 
-function _renderStrategyHistoryItem(item) {
+function _renderStrategyHistoryRow(item) {
   const isRunning   = item.status === 'running';
   const isError     = item.status === 'error';
   const isCompleted = item.status === 'completed';
 
-  const dt      = item.run_at ? formatKoreanDateTime(item.run_at) : '방금 시작';
+  const dt      = item.run_at ? formatKoreanDateTime(item.run_at) : '방금';
   const nSell   = (item.sells || []).length;
   const nBuy    = (item.buys  || []).length;
   const summary = isRunning ? 'LSY Agent와 대화 중...'
                 : isError   ? (item.error || '실행 실패')
-                : trunc(item.summary || '요약 없음', 100);
-
-  const clickable = isCompleted && !isError;
-  const cls = isRunning ? 'is-running' : isError ? 'is-error' : '';
-  const onclick = clickable ? `onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})"` : '';
+                : trunc(item.summary || '-', 60);
 
   const statusBadge = isRunning
     ? '<span class="strategy-badge strategy-badge-running"><span class="spinner" style="width:8px;height:8px;border-width:1.5px;margin-right:2px;"></span>실행 중</span>'
     : isError
-    ? '<span class="strategy-badge strategy-badge-error">실행 실패</span>'
+    ? '<span class="strategy-badge strategy-badge-error">실패</span>'
     : '<span class="strategy-badge strategy-badge-ok">완료</span>';
 
-  return `
-    <div class="strategy-history-item ${cls}" ${onclick} style="${clickable ? '' : 'cursor:default;'}">
-      <div class="strategy-history-top">
-        <span class="strategy-history-date">${escHtml(dt)}</span>
-        ${statusBadge}
-        ${item.dry_run ? '<span class="strategy-badge strategy-badge-dry">DRY</span>' : ''}
-        ${nSell > 0 ? `<span class="strategy-badge strategy-badge-sell">매도 ${nSell}</span>` : ''}
-        ${nBuy  > 0 ? `<span class="strategy-badge strategy-badge-buy">매수 ${nBuy}</span>`  : ''}
-        ${clickable ? '<span style="margin-left:auto;font-size:.72rem;color:var(--primary);">상세 보기 ›</span>' : ''}
-      </div>
-      <div class="strategy-history-summary">${escHtml(summary)}</div>
-    </div>`;
+  const modeBadge = item.dry_run
+    ? '<span class="strategy-badge strategy-badge-dry">DRY</span>'
+    : '<span class="strategy-badge strategy-badge-sell">실거래</span>';
+
+  const detailBtn = isCompleted
+    ? `<button class="btn-xs" onclick="openStrategyDetail(${JSON.stringify(JSON.stringify(item))})">상세</button>`
+    : '';
+
+  const summaryColor = isError ? 'color:var(--warn);' : 'color:var(--text);';
+
+  return `<tr>
+    <td style="font-size:.74rem;white-space:nowrap;color:var(--text-muted);">${escHtml(dt)}</td>
+    <td>${statusBadge}</td>
+    <td>${modeBadge}</td>
+    <td style="text-align:center;">${nSell > 0 ? `<span class="strategy-badge strategy-badge-sell">${nSell}</span>` : '<span style="color:var(--text-muted);">-</span>'}</td>
+    <td style="text-align:center;">${nBuy  > 0 ? `<span class="strategy-badge strategy-badge-buy">${nBuy}</span>`  : '<span style="color:var(--text-muted);">-</span>'}</td>
+    <td style="font-size:.8rem;${summaryColor}">${escHtml(summary)}</td>
+    <td>${detailBtn}</td>
+  </tr>`;
 }
 
 function _renderStrategyHistory(apiItems) {
-  const listEl = document.getElementById('strategy-history-list');
-  const items  = apiItems || [];
+  const tbody = document.getElementById('strategy-history-body');
+  if (!tbody) return;
+  const items = apiItems || [];
 
-  let html = '';
+  let rows = '';
   if (_strategyLiveItem) {
-    html += _renderStrategyHistoryItem(_strategyLiveItem);
+    rows += _renderStrategyHistoryRow(_strategyLiveItem);
   }
-  if (!items.length && !_strategyLiveItem) {
-    listEl.innerHTML = '<div class="strategy-empty">실행 이력이 없습니다.</div>';
+  if (!rows && !items.length) {
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted" style="text-align:center;padding:20px;">실행 이력이 없습니다.</td></tr>';
     return;
   }
-  html += items.map(item => _renderStrategyHistoryItem({ ...item, status: item.status || 'completed' })).join('');
-  listEl.innerHTML = html;
+  rows += items.map(item => _renderStrategyHistoryRow({ ...item, status: item.status || 'completed' })).join('');
+  tbody.innerHTML = rows;
 }
 
 document.getElementById('btn-strategy-run').addEventListener('click', async () => {
@@ -1054,16 +1058,16 @@ document.getElementById('btn-strategy-history-refresh').addEventListener('click'
 
 async function loadStrategyHistory(page) {
   _strategyPage = page;
-  const listEl = document.getElementById('strategy-history-list');
-  const pagEl  = document.getElementById('strategy-pagination');
+  const tbody = document.getElementById('strategy-history-body');
+  const pagEl = document.getElementById('strategy-pagination');
+  if (!tbody) return;
   if (!_strategyLiveItem) {
-    listEl.innerHTML = '<p class="text-muted" style="font-size:.8rem;">로딩 중...</p>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-muted" style="text-align:center;padding:20px;">로딩 중...</td></tr>';
   }
   try {
     const data = await API.get(`/api/strategy/history?page=${page}&per_page=10`);
     _renderStrategyHistory(data.items || []);
 
-    // 페이지네이션
     if (data.total_pages > 1) {
       let pagHtml = '';
       if (page > 1) pagHtml += `<button onclick="loadStrategyHistory(${page - 1})">‹ 이전</button>`;
@@ -1077,8 +1081,8 @@ async function loadStrategyHistory(page) {
       pagEl.innerHTML = '';
     }
   } catch (e) {
-    listEl.innerHTML = `<p class="text-warn">${escHtml(e.message)}</p>`;
-    pagEl.innerHTML = '';
+    if (tbody) tbody.innerHTML = `<tr><td colspan="7" class="text-warn">${escHtml(e.message)}</td></tr>`;
+    if (pagEl) pagEl.innerHTML = '';
   }
 }
 
