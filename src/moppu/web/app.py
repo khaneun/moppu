@@ -126,6 +126,7 @@ async def lifespan(_app: FastAPI):
     _rt = build_runtime()
     _token_log_path = _rt.cfg.app.data_dir / "token_usage.json"
     _load_token_log()
+    _recover_interrupted_strategy()
     yield
     _rt = None
 
@@ -852,8 +853,7 @@ def ingestion_history(page: int = 1, per_page: int = 10):
 
 
 @app.get("/api/pipeline/video/{video_id}")
-def get_video_detail(video_id: str, request: Request):
-    _require_auth(request)
+def get_video_detail(video_id: str):
     assert _rt is not None
     with _rt.session_factory() as s:
         v = s.query(Video).filter(Video.video_id == video_id).one_or_none()
@@ -896,6 +896,35 @@ _strategy_run_msg: str = ""
 def _strategy_history_dir() -> Path:
     base = _rt.cfg.app.data_dir if _rt else Path("data")
     return Path(base) / "strategy_history"
+
+
+def _recover_interrupted_strategy() -> None:
+    """서버 재시작 시 RUNNING.json이 있으면 중단된 실행을 에러 이력으로 기록."""
+    try:
+        hist_dir = _strategy_history_dir()
+        running_marker = hist_dir / "RUNNING.json"
+        if not running_marker.exists():
+            return
+        data = json.loads(running_marker.read_text(encoding="utf-8"))
+        started_at = data.get("started_at", datetime.now(KST).isoformat())
+        dry_run = data.get("dry_run", True)
+        ts = datetime.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
+        (hist_dir / f"{ts}.json").write_text(
+            json.dumps({
+                "run_at": started_at,
+                "dry_run": dry_run,
+                "error": "서버 재시작으로 중단됨",
+                "plan": {
+                    "sells": [], "buys": [],
+                    "summary": "서버 재시작으로 전략 수립이 중단되었습니다.",
+                },
+                "results": [],
+            }, ensure_ascii=False)
+        )
+        running_marker.unlink()
+        log.info("strategy.interrupted_recovered", started_at=started_at)
+    except Exception as e:
+        log.warning("strategy.recover_failed", err=str(e))
 
 
 @app.get("/api/strategy/config")
@@ -981,9 +1010,21 @@ def run_strategy():
             pass
 
     def _run() -> None:
+        import os as _os
         global _strategy_running, _strategy_run_msg
         _strategy_running = True
         _strategy_run_msg = "전략 수립 시작..."
+        hist_dir = _strategy_history_dir()
+        running_marker = hist_dir / "RUNNING.json"
+        try:
+            hist_dir.mkdir(parents=True, exist_ok=True)
+            running_marker.write_text(json.dumps({
+                "started_at": datetime.now(KST).isoformat(),
+                "pid": _os.getpid(),
+                "dry_run": planner._cfg.dry_run,  # noqa: SLF001
+            }, ensure_ascii=False))
+        except Exception:
+            pass
         try:
             result = planner.run()
             # broker 미설정 등 오류를 반환값으로 전달하는 경우
@@ -1005,6 +1046,7 @@ def run_strategy():
             _save_error(err_str)
         finally:
             _strategy_running = False
+            running_marker.unlink(missing_ok=True)
 
     threading.Thread(target=_run, daemon=True).start()
     return {"started": True, "message": "전략 수립을 시작했습니다."}

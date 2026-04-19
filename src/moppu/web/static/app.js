@@ -443,6 +443,11 @@ async function loadPipeline() {
 document.getElementById('btn-pipeline-refresh').addEventListener('click', () => loadPipeline());
 document.getElementById('btn-ingest-history-refresh').addEventListener('click', () => loadIngestionHistory(_ingestPage));
 
+document.getElementById('ingest-history-body').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-vid]');
+  if (tr) openIngestDetail(tr.dataset.vid);
+});
+
 // ---- Ingestion history ----
 
 let _ingestPage = 1;
@@ -463,8 +468,7 @@ async function loadIngestionHistory(page) {
     tbody.innerHTML = data.items.map(v => {
       const dt = v.created_at ? formatDateTimeTwoLine(v.created_at) : '-';
       const title = trunc(v.title || v.video_id, 48);
-      const vidJson = JSON.stringify(JSON.stringify(v));
-      return `<tr class="clickable-row" onclick="openIngestDetail(${vidJson})">
+      return `<tr class="clickable-row" data-vid="${escHtml(v.video_id)}">
         <td style="font-size:.76rem;width:140px;">${dt}</td>
         <td style="font-size:.82rem;">${escHtml(title)}</td>
       </tr>`;
@@ -1136,18 +1140,18 @@ document.getElementById('ingest-detail-modal').addEventListener('click', (e) => 
   if (e.target === document.getElementById('ingest-detail-modal')) closeModal('ingest-detail-modal');
 });
 
-async function openIngestDetail(videoJson) {
-  const v = JSON.parse(videoJson);
+async function openIngestDetail(videoId) {
   const modal = document.getElementById('ingest-detail-modal');
   const body  = document.getElementById('ingest-modal-body');
   const dateEl = document.getElementById('ingest-modal-date');
 
-  dateEl.textContent = v.created_at ? formatKoreanDateTime(v.created_at) : '';
+  dateEl.textContent = '';
   body.innerHTML = '<div class="modal-loading">로딩 중</div>';
   modal.style.display = 'flex';
 
   try {
-    const d = await API.get(`/api/pipeline/video/${encodeURIComponent(v.video_id)}`);
+    const d = await API.get(`/api/pipeline/video/${encodeURIComponent(videoId)}`);
+    dateEl.textContent = d.created_at ? formatKoreanDateTime(d.created_at) : '';
     const url = d.url || `https://www.youtube.com/watch?v=${d.video_id}`;
 
     const sourceLabel = d.channel_name
