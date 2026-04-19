@@ -47,6 +47,7 @@ class Channel(Base):
     tags: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     enabled: Mapped[bool] = mapped_column(default=True)
     last_polled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    title_contains: Mapped[str | None] = mapped_column(String(256), nullable=True)
 
     videos: Mapped[list["Video"]] = relationship(back_populates="channel", cascade="all, delete-orphan")
 

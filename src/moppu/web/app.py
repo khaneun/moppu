@@ -699,6 +699,7 @@ def list_channels():
                 "name": c.name,
                 "tags": c.tags,
                 "enabled": c.enabled,
+                "title_contains": c.title_contains,
                 "last_polled_at": c.last_polled_at.isoformat() if c.last_polled_at else None,
             }
             for c in rows
@@ -739,6 +740,7 @@ class ChannelUpdateRequest(BaseModel):
     name: str | None = None
     enabled: bool | None = None
     handle: str | None = None
+    title_contains: str | None = None
 
 
 @app.put("/api/channels/{channel_id}")
@@ -754,6 +756,8 @@ def update_channel(channel_id: str, req: ChannelUpdateRequest):
             ch.enabled = req.enabled
         if req.handle is not None:
             ch.handle = req.handle
+        if req.title_contains is not None:
+            ch.title_contains = req.title_contains
         s.commit()
     return {"ok": True}
 
@@ -1174,11 +1178,12 @@ def collect_items():
             (sp for sp in _rt.channels_cfg.channels if sp.channel_id == ch.channel_id),
             None,
         )
+        title_contains = (spec.title_contains if spec else None) or ch.title_contains
         channel_items.append({
             "channel_id": ch.channel_id,
             "handle": ch.handle,
             "name": ch.name,
-            "title_contains": spec.title_contains if spec else None,
+            "title_contains": title_contains,
         })
 
     return {

@@ -64,6 +64,20 @@ class Pipeline:
                 return spec
         return None
 
+    def _build_spec_map(self, channels: list[Channel]) -> dict[str, ChannelSpec]:
+        """Merge YAML specs with DB channel.title_contains (YAML takes precedence)."""
+        yaml_map = {s.channel_id: s for s in self._channels_cfg.channels if s.channel_id}
+        result: dict[str, ChannelSpec] = {}
+        for ch in channels:
+            if ch.channel_id in yaml_map:
+                result[ch.channel_id] = yaml_map[ch.channel_id]
+            elif ch.title_contains:
+                result[ch.channel_id] = ChannelSpec(
+                    channel_id=ch.channel_id,
+                    title_contains=ch.title_contains,
+                )
+        return result
+
     def _passes_filter(self, info: VideoInfo, spec: ChannelSpec) -> bool:
         """Return False if info should be skipped (title_contains filter)."""
         if spec.title_contains is not None:
@@ -114,6 +128,7 @@ class Pipeline:
             if channel_ids:
                 q = q.filter(Channel.channel_id.in_(channel_ids))
             channels = q.all()
+            spec_map = self._build_spec_map(channels)
 
         for ch in channels:
             try:
@@ -122,7 +137,7 @@ class Pipeline:
                 log.warning("backfill.list_failed", channel_id=ch.channel_id, err=str(e))
                 continue
 
-            spec = self._spec_for(ch.channel_id)
+            spec = spec_map.get(ch.channel_id)
             for v in videos:
                 if spec and not self._passes_filter(v, spec):
                     continue
@@ -136,9 +151,10 @@ class Pipeline:
         processed = 0
 
         with self._sf() as session:
-            channel_ids = [c.channel_id for c in session.query(Channel).filter_by(enabled=True).all()]
+            channels = session.query(Channel).filter_by(enabled=True).all()
+            channel_ids = [c.channel_id for c in channels]
+            spec_map = self._build_spec_map(channels)
 
-        spec_map = {s.channel_id: s for s in self._channels_cfg.channels if s.channel_id}
         for event in self._watcher.poll_once(channel_ids):
             spec = spec_map.get(event.channel_id)
             if spec and not self._passes_filter(event.video, spec):
@@ -156,15 +172,12 @@ class Pipeline:
         ingests new videos that pass the ``title_contains`` filter (if set).
         """
         with self._sf() as session:
-            channel_ids = [
-                c.channel_id
-                for c in session.query(Channel).filter_by(enabled=True).all()
-                if c.channel_id
-            ]
+            channels = [c for c in session.query(Channel).filter_by(enabled=True).all() if c.channel_id]
+            channel_ids = [c.channel_id for c in channels]
+            spec_map = self._build_spec_map(channels)
 
         batch = self._cfg.ingestion.batch_size
         processed = 0
-        spec_map = {s.channel_id: s for s in self._channels_cfg.channels if s.channel_id}
 
         for event in self._watcher.poll_once(channel_ids):
             spec = spec_map.get(event.channel_id)
@@ -400,7 +413,13 @@ class Pipeline:
                     name=spec.name,
                     tags=list(spec.tags),
                     enabled=spec.enabled,
+                    title_contains=spec.title_contains,
                 )
                 session.add(ch)
                 session.commit()
+            else:
+                # Update title_contains if provided
+                if spec.title_contains is not None:
+                    ch.title_contains = spec.title_contains
+                    session.commit()
             return ch
