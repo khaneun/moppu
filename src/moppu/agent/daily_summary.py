@@ -44,6 +44,7 @@ def generate_and_save(
     data_dir: Path,
     *,
     force: bool = False,
+    update_persona: bool = True,
 ) -> dict[str, Any] | None:
     """Generate LLM summary of today's ingested videos and write to disk.
 
@@ -138,12 +139,13 @@ def generate_and_save(
     save_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     log.info("daily_summary.saved", date=today_str, path=str(save_path))
 
-    # 페르소나 점진적 업데이트 (새 영상 기반)
-    new_video_ids = [v["video_id"] for v in video_infos]
-    try:
-        from moppu.agent.persona import update_with_new
-        update_with_new(session_factory, llm, data_dir, new_video_ids)
-    except Exception as e:
-        log.warning("persona.update_failed", err=str(e))
+    # 페르소나 점진적 업데이트 (오늘 수집 영상 기반 — collect/done 경로와 중복 방지)
+    if update_persona:
+        new_video_ids = [v["video_id"] for v in video_infos]
+        try:
+            from moppu.agent.persona import update_with_new
+            update_with_new(session_factory, llm, data_dir, new_video_ids)
+        except Exception as e:
+            log.warning("persona.update_failed", err=str(e))
 
     return result

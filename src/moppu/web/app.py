@@ -1559,12 +1559,12 @@ class CollectDoneRequest(BaseModel):
 
 @app.post("/api/collect/done")
 def collect_done(req: CollectDoneRequest):
-    """로컬 수집기가 작업 완료 후 호출 — EC2 상태 메시지 업데이트 + Telegram 알림."""
+    """로컬 수집기가 작업 완료 후 호출 — 상태 업데이트 + 요약/페르소나 갱신 + Telegram 알림."""
+    assert _rt is not None
     global _pipeline_run_msg
     _pipeline_run_msg = req.message
     _write_pipeline_log(f"[LOCAL 완료] {req.message}")
 
-    # 수집된 영상 있으면 텔레그램 알림
     if req.videos:
         lines = [f"📥 *수집 완료 ({req.success}/{req.total}건)*"]
         for v in req.videos[:10]:
@@ -1574,6 +1574,39 @@ def collect_done(req: CollectDoneRequest):
         if len(req.videos) > 10:
             lines.append(f"_외 {len(req.videos) - 10}건_")
         _send_telegram("\n".join(lines))
+
+        # 처리된 video_id 기준으로 요약 재생성 + 페르소나 점진 업데이트
+        # created_at 날짜와 무관하게 실제 처리된 영상 반영 (재시도 포함)
+        processed_ids = [v["video_id"] for v in req.videos if v.get("video_id")]
+
+        def _do_update(video_ids: list[str]) -> None:
+            from moppu.agent.daily_summary import generate_and_save
+            from moppu.agent.persona import update_with_new
+            try:
+                _write_pipeline_log("[LOCAL] 수집 요약 재생성 중...")
+                result = generate_and_save(
+                    _rt.session_factory, _rt.llm, _rt.cfg.app.data_dir,
+                    force=True, update_persona=False,  # 페르소나는 아래에서 별도 처리
+                )
+                if result:
+                    usage = result.get("usage") or {}
+                    if usage.get("input_tokens"):
+                        _log_token_usage(_rt.cfg.llm.provider, _rt.cfg.llm.model, usage)
+                _write_pipeline_log("[LOCAL] 수집 요약 재생성 완료")
+            except Exception as e:
+                _write_pipeline_log(f"[LOCAL][ERROR] 요약 재생성 실패: {e}")
+                log.error("collect.summary_failed", err=str(e))
+
+            try:
+                _write_pipeline_log(f"[LOCAL] LSY 페르소나 업데이트 중 ({len(video_ids)}건)...")
+                update_with_new(_rt.session_factory, _rt.llm, _rt.cfg.app.data_dir, video_ids)
+                _write_pipeline_log("[LOCAL] LSY 페르소나 업데이트 완료")
+            except Exception as e:
+                _write_pipeline_log(f"[LOCAL][ERROR] 페르소나 업데이트 실패: {e}")
+                log.error("collect.persona_failed", err=str(e))
+
+        threading.Thread(target=_do_update, args=(processed_ids,), daemon=True).start()
+
     return {"ok": True}
 
 
