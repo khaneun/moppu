@@ -1393,9 +1393,19 @@ def collect_items():
 
         enabled_chs = s.query(Channel).filter_by(enabled=True).all()
 
-        # 재시도 대기 큐 — 기존 Video 레코드 정보 기반 source_type 포함
+        # 재시도 대기 큐: 인메모리 큐 + DB pending 채널 영상 합산
+        retry_vid_ids: set[str] = set(_local_retry_video_ids)
+        db_pending_channel = (
+            s.query(Video)
+            .filter(Video.status == "pending")
+            .filter(~Video.source_type.startswith("list:"))
+            .all()
+        )
+        for v in db_pending_channel:
+            retry_vid_ids.add(v.video_id)
+
         retry_items = []
-        for vid in list(_local_retry_video_ids):
+        for vid in retry_vid_ids:
             v = s.query(Video).filter_by(video_id=vid).one_or_none()
             if v is None:
                 continue
@@ -1588,16 +1598,28 @@ def request_local_run():
 def poll_local_run():
     """로컬 수집기가 주기적으로 호출 — 실행 요청·재시도 큐 확인 및 heartbeat 갱신."""
     global _local_run_requested, _local_retry_video_ids, _local_last_heartbeat
+    assert _rt is not None
     _local_last_heartbeat = datetime.now(timezone.utc)
     requested = _local_run_requested
-    retry_ids = list(_local_retry_video_ids)
     if requested:
         _local_run_requested = False
-    if retry_ids:
-        _local_retry_video_ids = []
+
+    # 인메모리 큐 + DB pending 채널 영상 합산 (큐 소진 후에도 재시도 가능)
+    retry_ids: set[str] = set(_local_retry_video_ids)
+    _local_retry_video_ids = []
+    with _rt.session_factory() as s:
+        db_pending = (
+            s.query(Video.video_id)
+            .filter(Video.status == "pending")
+            .filter(~Video.source_type.startswith("list:"))
+            .all()
+        )
+        for (vid,) in db_pending:
+            retry_ids.add(vid)
+
     return {
         "requested": requested,
-        "retry_video_ids": retry_ids,
+        "retry_video_ids": list(retry_ids),
     }
 
 
