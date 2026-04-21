@@ -2,6 +2,53 @@
 
 ---
 
+## v0.3.0 — 2026-04-21
+
+### 주요 기능
+
+#### 💰 종합 현황 개선
+- **자산 계산 버그 수정**: `inquire-balance` TR 응답 `output2` 필드 직접 파싱으로 전면 교체
+  - 10개 필드 정확 파싱: 예수금·D+2예수금·주식평가·총평가·매입원가·평가손익·수익률·순자산·전일대비·전일대비율
+- **보유 종목 간소화**: 테이블 4컬럼 (종목명·수량·평균가·평가손익)
+- **과거 매매 이력 팝업**: 종목 행 클릭 → 90일 매매 내역 + 평균 매입가 기반 실현손익·수익률 계산
+- **새 API**: `GET /api/positions/{ticker}/trades`
+
+#### 🤖 전략 수립가 강화
+- **LSY 강경도(conviction 1-10)**: 시스템 프롬프트에 구간별 투자 가이드 주입
+  - 8-10: 공격적 포지션, 5-7: 균형 분할매수, 1-4: 신중 관망
+- **강경도 기반 추가 투자 요청**: 예산 부족 시 Telegram 자동 알림
+  - 🔥 긴급(8-10) / 💰 권유(5-7) / 📝 알림(1-4) 톤 차별화
+  - 강경도 8+ 이체 미확인 시 follow-up 메시지
+- **라이브 로그 패널**: 전략 실행 중 실시간 로그 스트리밍 (고정 200px, 자동 스크롤)
+- **아이콘 버튼**: 새로고침(🔄)·중단(⏹) 버튼으로 실행 제어
+- **실패 이력 로그 팝업**: 실패한 전략 이력 행 클릭 → `.log` 파일 내용 표시
+- **완료 상세 2줄 표시**: 매수/매도 계획 각각 독립 행으로 표시
+- **새 API**: `GET /api/strategy/live-log`, `POST /api/strategy/stop`, `GET /api/strategy/history/{filename}`
+
+#### 🔧 파이프라인 개선
+- **EC2 YouTube 직접 호출 제거**: `poll_channels` job 완전 삭제 (AWS IP 차단 대응)
+  - `config.yaml`에서 `poll_channels_cron` 제거, `upload_day_cron`만 유지
+  - `upload_day` job은 `sync_video_lists()`만 수행, YouTube 호출 없음
+- **실패 건 재시도**: 파이프라인 이력에서 실패 영상 재시도 버튼 (상태 `pending` 재전환 + 로컬 큐 전달)
+- **로컬 수집기 연결 상태 배너**: 5분 이상 heartbeat 없으면 `disconnected` 표시
+- **수집 이력 상태 컬럼 추가**
+
+#### ⏰ 스케줄러 타임존 수정
+- `BlockingScheduler(timezone=KST)` + `CronTrigger.from_crontab(..., timezone=KST)` 명시
+- KST 자정(`"5 0 * * *"`) 정확 실행 보장
+
+#### 🏦 KIS 브로커 API 확장
+- `AccountSummary` 데이터클래스: 10개 자산 필드
+- `TradeFill` 데이터클래스: 체결 내역 (날짜·종목·수량·가격·구분)
+- `get_account_summary()`: `inquire-balance` TR 직접 파싱
+- `get_daily_trades()`: `TTTC8001R`/`VTTC8001R` TR, 90일 이내 체결 내역
+
+### 버그 수정
+- 4/20 09시 2건 중복 수집: `poll_channels_cron` 설정값(`*/15`) → EC2에서 YouTube RSS 직접 호출 → 제거로 해결
+- 예수금 천만원 표시 오류: 수동 계산 로직 제거, KIS API 필드 직접 사용
+
+---
+
 ## v0.2.0 — 2026-04-15
 
 ### 주요 기능

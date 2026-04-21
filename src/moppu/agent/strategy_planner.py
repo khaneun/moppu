@@ -75,6 +75,13 @@ LSY 애널리스트의 섹터 분석과 종목 추천을 바탕으로, 현실적
 - 종목코드는 한국 주식 6자리 숫자입니다.
 - quantity=-1 은 전량 매도를 의미합니다.
 
+## LSY 강경도(1-10)에 따른 계획 수립 가이드
+- 8-10 (강력 매수 신호): 기회 선점을 위해 예산을 최대한 활용. 가용 자금 대비 90%+ 매수 집행.
+  부족하면 `needs_additional_krw` 에 기존 대비 *큰 금액*을 반영하고 매수 reason 에
+  강하게 졸라 (긴급·적극적 어조). 기존 보유 중 부진 종목 매도도 공격적으로.
+- 5-7 (중립-약강세): 균형 있는 배분. 가용 자금의 60-80% 사용. 매수 이유는 차분한 톤.
+- 1-4 (신중): 자금 투입 최소화. 관망 권고. `summary` 에 "신중 유지" 명시.
+
 ## 출력 형식
 반드시 아래 JSON 스키마에 맞는 단일 JSON 객체만 출력하세요. 코드 블록 없이 순수 JSON만 출력합니다.
 
@@ -124,17 +131,37 @@ class StrategyPlannerAgent:
     # ── 공개 진입점 ───────────────────────────────────────────────────────
 
     def run(self) -> dict[str, Any]:
-        """전략 수립 전체 파이프라인. 실패 시 예외를 그대로 전파합니다."""
+        """전략 수립 전체 파이프라인. 실패 시에도 로그를 남기고 결과 dict 를 반환."""
         now_str = datetime.now(KST).strftime("%Y-%m-%d %H:%M KST")
+        self._log_lines: list[str] = []
+        self._append_log(f"=== 전략 수립 시작 ({now_str}) ===")
+        self._append_log(f"dry_run={self._cfg.dry_run}, max_order_krw={self._cfg.max_order_krw:,}")
+
         log.info("strategy_planner.start", ts=now_str)
 
         if not self._broker:
+            self._append_log("[ERROR] broker not configured")
             log.warning("strategy_planner.no_broker")
-            return {"error": "broker not configured"}
+            return {"error": "broker not configured", "log": "\n".join(self._log_lines)}
 
-        result = self._pipeline()
+        try:
+            result = self._pipeline()
+        except Exception as e:
+            self._append_log(f"[ERROR] 전략 수립 실패: {e}")
+            result = {
+                "error": str(e),
+                "plan": {"sells": [], "buys": [], "summary": f"실행 실패: {e}"},
+                "results": [],
+            }
+        result["log"] = "\n".join(self._log_lines)
         self._save_history(result)
         return result
+
+    def _append_log(self, msg: str) -> None:
+        ts = datetime.now(KST).strftime("%H:%M:%S")
+        line = f"[{ts}] {msg}"
+        self._log_lines.append(line)
+        log.info("strategy_planner.step", msg=msg)
 
     # ── 내부 파이프라인 ───────────────────────────────────────────────────
 
@@ -142,12 +169,15 @@ class StrategyPlannerAgent:
         from moppu.agent.executor import TradeExecutor
 
         # 1. 현재 포트폴리오 조회
+        self._append_log("[1/6] 포트폴리오 조회 중...")
         positions = self._broker.get_positions()
         cash = self._broker.get_cash_balance_krw()
         portfolio_text = _format_portfolio(positions, cash)
+        self._append_log(f"  보유 종목 {len(positions)}개, 예수금 {cash:,.0f}원")
         log.info("strategy_planner.portfolio_loaded", n_positions=len(positions), cash_krw=cash)
 
         # 2. LSY Turn 1 — 섹터 분석
+        self._append_log("[2/6] LSY Turn 1 — 섹터 분석 요청...")
         history: list[dict[str, str]] = []
         sector_prompt = (
             f"[현재 포트폴리오]\n{portfolio_text}\n\n"
@@ -156,12 +186,16 @@ class StrategyPlannerAgent:
             "2. 비중을 늘려야 할 섹터 (이유 포함)\n"
             "3. 정리 또는 축소해야 할 섹터/종목 (이유 포함)\n"
             "4. 신규 편입을 고려할 섹터\n"
+            "5. 전체 시장 전망의 강경도 (1-10, 10이 가장 강경한 매수 신호)\n"
         )
         sector_result = self._trader.chat(sector_prompt, history=history)
         sector_analysis = sector_result["text"]
         history.append({"role": "user", "content": sector_prompt})
         history.append({"role": "assistant", "content": sector_analysis})
-        log.info("strategy_planner.sector_analysis_done")
+        # LSY 강경도 추출 (1-10)
+        self._lsy_conviction = _extract_conviction(sector_analysis)
+        self._append_log(f"  섹터 분석 완료 (강경도={self._lsy_conviction}/10)")
+        log.info("strategy_planner.sector_analysis_done", conviction=self._lsy_conviction)
 
         # usage 누적 (비용 집계용)
         _acc_usage: dict[str, int] = {"input_tokens": 0, "output_tokens": 0}
@@ -173,31 +207,36 @@ class StrategyPlannerAgent:
         _add_usage(sector_result.get("usage") or {})
 
         # 3. LSY Turn 2 — 구체적 종목 후보
+        self._append_log("[3/6] LSY Turn 2 — 종목 후보 요청...")
         candidate_prompt = (
             "위 분석에서 추천한 섹터의 구체적인 매수 종목 후보를 5개 이내로 추천해주세요.\n"
             "각 종목: 종목명 (종목코드: 6자리숫자) 형식으로 작성하고, 추천 이유를 함께 써주세요.\n"
-            "매도 검토 종목도 같은 형식으로 명시해주세요."
+            "매도 검토 종목도 같은 형식으로 명시해주세요.\n"
+            "각 종목별 확신도(conviction)를 1-10으로 명시해주세요."
         )
         candidate_result = self._trader.chat(candidate_prompt, history=history)
         candidate_text = candidate_result["text"]
         history.append({"role": "user", "content": candidate_prompt})
         history.append({"role": "assistant", "content": candidate_text})
         _add_usage(candidate_result.get("usage") or {})
-        log.info("strategy_planner.candidates_done")
+        self._append_log("  종목 후보 수신")
 
         # 4. LSY Turn 3 — 종목 코드 JSON 추출
+        self._append_log("[4/6] LSY Turn 3 — 종목 코드 추출...")
         ticker_result = self._trader.chat(_TICKER_EXTRACT_PROMPT, history=history)
         tickers = _parse_ticker_json(ticker_result["text"])
         _add_usage(ticker_result.get("usage") or {})
         buy_tickers: list[str] = tickers.get("buy", [])
         sell_tickers_from_lsy: list[str] = tickers.get("sell", [])
-        log.info("strategy_planner.tickers_extracted", buy=buy_tickers, sell=sell_tickers_from_lsy)
+        self._append_log(f"  매수 후보 {len(buy_tickers)}개, 매도 검토 {len(sell_tickers_from_lsy)}개")
 
         # 5. 시세 조회 (현재 보유 + 신규 후보)
         all_tickers = list(set(buy_tickers + [p.ticker for p in positions]))
+        self._append_log(f"[5/6] 시세 조회 ({len(all_tickers)}종목)...")
         quotes = self._fetch_quotes(all_tickers)
 
         # 6. 전략 수립가 LLM — 최종 계획 수립
+        self._append_log("[6/6] 최종 계획 수립 (LLM)...")
         plan, plan_usage = self._build_plan(
             portfolio_text=portfolio_text,
             sector_analysis=sector_analysis,
@@ -208,24 +247,27 @@ class StrategyPlannerAgent:
             positions=positions,
         )
         _add_usage(plan_usage)
-        log.info(
-            "strategy_planner.plan_built",
-            n_sells=len(plan.sells),
-            n_buys=len(plan.buys),
-            needs_additional_krw=plan.needs_additional_krw,
-        )
+        self._append_log(f"  매도 {len(plan.sells)}건 / 매수 {len(plan.buys)}건 / 강경도 {self._lsy_conviction}/10")
 
         # 7. 자금 요청 (부족 시)
         if plan.needs_additional_krw > 0:
+            self._append_log(f"  자금 부족 {plan.needs_additional_krw:,.0f}원 — 텔레그램 요청")
             cash = self._handle_fund_request(plan, cash)
+            self._append_log(f"  재확인 예수금: {cash:,.0f}원")
             plan = self._adjust_plan_to_budget(plan, cash, quotes, positions)
+            self._append_log(f"  예산 내 조정됨 — 매수 {len(plan.buys)}건")
 
         # 8. 실행 위임
+        self._append_log(f"  실행 중 (dry_run={self._cfg.dry_run})...")
         executor = TradeExecutor(broker=self._broker, dry_run=self._cfg.dry_run)
         results = executor.execute(plan, positions)
+        ok = sum(1 for r in results if r.get("status") == "ok")
+        err = sum(1 for r in results if r.get("status") == "error")
+        self._append_log(f"  실행 완료 — 성공 {ok}건, 실패 {err}건")
 
         # 9. Telegram 완료 알림
         self._notify_completion(plan, results)
+        self._append_log("=== 전략 수립 완료 ===")
 
         return {
             "plan": plan.model_dump(),
@@ -233,6 +275,7 @@ class StrategyPlannerAgent:
             "usage": _acc_usage,
             "provider": self._llm.name,
             "model": self._llm.model,
+            "conviction": self._lsy_conviction,
         }
 
     # ── 계획 수립 ─────────────────────────────────────────────────────────
@@ -279,13 +322,15 @@ class StrategyPlannerAgent:
             indent=2,
         )
 
+        conviction = getattr(self, "_lsy_conviction", 5)
         user_prompt = (
+            f"## LSY 강경도\n{conviction}/10\n\n"
             f"## 현재 포트폴리오\n{portfolio_text}\n\n"
             f"## 가용 현금\n{cash:,.0f}원\n\n"
             f"## LSY 섹터 분석\n{sector_analysis[:2000]}\n\n"
             f"## LSY 종목 추천\n{candidate_text[:1500]}{hint_text}\n\n"
             f"## 종목별 현재 시세\n{quotes_text}\n\n"
-            "위 정보를 바탕으로 최종 포트폴리오 업데이트 계획을 수립해주세요.\n"
+            f"LSY 강경도 {conviction}/10 에 따른 계획 수립 가이드를 따라주세요.\n"
             "매도 후 확보 자금도 매수에 활용할 수 있습니다.\n"
             f"JSON 예시:\n{schema_example}"
         )
@@ -312,24 +357,104 @@ class StrategyPlannerAgent:
     # ── 자금 요청 ─────────────────────────────────────────────────────────
 
     def _handle_fund_request(self, plan: TradePlan, current_cash: float) -> float:
+        """추가 자금 요청. LSY 강경도에 따라 메시지 톤을 조절.
+
+        - 강경도 8+ : 강하게 졸라 (즉시 이체 요청)
+        - 강경도 5-7: 권유 (이체 고려 부탁)
+        - 강경도 1-4: 소극 (예산 내 조정 제안)
+        """
         from moppu.bot.telegram_bot import send_telegram_message
 
-        msg = (
-            f"💰 *전략 수립가 — 추가 자금 요청*\n\n"
-            f"현재 가용 현금: {current_cash:,.0f}원\n"
-            f"예상 매도 확보: {plan.total_sell_krw:,.0f}원\n"
-            f"예상 매수 총액: {plan.total_buy_krw:,.0f}원\n"
-            f"부족 금액: *{plan.needs_additional_krw:,.0f}원*\n\n"
-            f"{self._cfg.fund_request_wait_min}분 후 잔고를 재확인합니다.\n"
-            f"이체가 어렵다면 보유 자금 내에서 자동 조정됩니다."
+        conviction = getattr(self, "_lsy_conviction", 5)
+
+        # 포트폴리오 현황
+        try:
+            positions = self._broker.get_positions()
+        except Exception:
+            positions = []
+        pf_lines = []
+        if positions:
+            pf_lines.append("*현재 포트폴리오*")
+            for p in positions[:10]:
+                label = f"{p.name}({p.ticker})" if p.name else p.ticker
+                pl_pct = ((p.unrealized_pl or 0) / (p.avg_price * p.quantity) * 100) if p.avg_price * p.quantity > 0 else 0
+                pf_lines.append(f"  • {label}: {p.quantity}주, 손익 {pl_pct:+.1f}%")
+
+        buy_lines = []
+        for b in plan.buys[:8]:
+            buy_lines.append(f"  • {b.ticker}: {b.quantity}주 × {b.price:,.0f}원 — {b.reason[:50]}")
+
+        # 톤 결정
+        if conviction >= 8:
+            tone_head = "🔥 *긴급 — LSY 강력 매수 신호 (강경도 {conv}/10)*"
+            tone_ask = (
+                "LSY 애널리스트가 *매우 강하게* 매수를 권고하고 있습니다.\n"
+                "*지금 이체해서라도 편입하는 것이 합리적*이라는 판단입니다.\n"
+                "가능하시면 *{shortfall:,.0f}원* 이체 부탁드립니다."
+            )
+        elif conviction >= 5:
+            tone_head = "💰 *자금 요청 (LSY 강경도 {conv}/10)*"
+            tone_ask = (
+                "LSY 추천에 따라 매수를 검토합니다.\n"
+                "추가 이체 *{shortfall:,.0f}원* 이 가능하시면 계획대로 집행하고,\n"
+                "어려우시면 보유 자금 내에서 축소 집행합니다."
+            )
+        else:
+            tone_head = "📝 *자금 부족 알림 (LSY 강경도 {conv}/10)*"
+            tone_ask = (
+                "LSY 의견이 강하지 않아 무리한 이체는 권장하지 않습니다.\n"
+                "보유 자금 내에서 축소 집행하거나, *{shortfall:,.0f}원* 이체도 가능합니다."
+            )
+
+        header = tone_head.format(conv=conviction)
+        ask = tone_ask.format(shortfall=plan.needs_additional_krw)
+
+        parts = [
+            header,
+            "",
+            f"가용 현금: {current_cash:,.0f}원",
+            f"예상 매도 확보: {plan.total_sell_krw:,.0f}원",
+            f"매수 예정 총액: {plan.total_buy_krw:,.0f}원",
+            f"*부족 금액: {plan.needs_additional_krw:,.0f}원*",
+            "",
+        ]
+        if pf_lines:
+            parts.extend(pf_lines)
+            parts.append("")
+        if buy_lines:
+            parts.append("*매수 계획*")
+            parts.extend(buy_lines)
+            parts.append("")
+        parts.append(ask)
+        parts.append("")
+        parts.append(f"⏱ {self._cfg.fund_request_wait_min}분 후 잔고 재확인합니다.")
+
+        send_telegram_message(self._settings, "\n".join(parts))
+        log.info(
+            "strategy_planner.fund_request_sent",
+            shortfall=plan.needs_additional_krw,
+            conviction=conviction,
         )
-        send_telegram_message(self._settings, msg)
-        log.info("strategy_planner.fund_request_sent", shortfall=plan.needs_additional_krw)
 
         time.sleep(self._cfg.fund_request_wait_min * 60)
 
         new_cash = self._broker.get_cash_balance_krw()
         log.info("strategy_planner.fund_recheck", before=current_cash, after=new_cash)
+
+        # 강경도 8+이고 이체가 안됐으면 보유 자금 정리 제안을 추가로 보냄
+        if conviction >= 8 and new_cash <= current_cash + 1000:
+            follow_up = [
+                "⚠️ *이체 미확인 — 자산 정리 제안*",
+                "",
+                f"LSY 강경도 {conviction}/10 기준, 편입 기회를 놓치는 것보다는",
+                "*기존 보유 중 비중이 낮거나 손익이 둔한 종목을 정리*해서라도",
+                "신규 편입 자금을 확보하는 편이 합리적입니다.",
+                "",
+                "자동 조정 로직이 가용 자금 내에서 최선을 다합니다.",
+            ]
+            send_telegram_message(self._settings, "\n".join(follow_up))
+            log.info("strategy_planner.conviction_follow_up_sent", conviction=conviction)
+
         return new_cash
 
     def _adjust_plan_to_budget(
@@ -392,6 +517,11 @@ class StrategyPlannerAgent:
             }
             path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
             log.info("strategy_planner.history_saved", path=str(path))
+            # 로그 파일 동시 저장 (실행 로그 상세 팝업용)
+            log_text = result.get("log") or ""
+            if log_text:
+                log_path = hist_dir / f"{ts}.log"
+                log_path.write_text(log_text, encoding="utf-8")
         except Exception as e:
             log.warning("strategy_planner.history_save_failed", err=str(e))
 
@@ -527,6 +657,34 @@ def _estimate_sell_proceeds(
             qty = sell.quantity
         total += price * qty
     return total
+
+
+def _extract_conviction(text: str) -> int:
+    """LSY 응답에서 강경도(1-10)를 추출. 실패 시 5(중립) 반환."""
+    patterns = [
+        r"강경도\s*[=:]\s*(\d+)",
+        r"확신도\s*[=:]\s*(\d+)",
+        r"conviction\s*[=:]\s*(\d+)",
+        r"강경도는?\s*(\d+)",
+        r"(\d+)\s*/\s*10",
+        r"(\d+)\s*점",
+    ]
+    for p in patterns:
+        m = re.search(p, text, flags=re.IGNORECASE)
+        if m:
+            try:
+                v = int(m.group(1))
+                return max(1, min(10, v))
+            except (TypeError, ValueError):
+                continue
+    # 키워드 기반 fallback
+    strong_signals = sum(text.count(k) for k in ["강력", "강세", "적극", "확신", "매수 추천"])
+    weak_signals = sum(text.count(k) for k in ["신중", "관망", "조심", "하락", "약세"])
+    if strong_signals > weak_signals + 2:
+        return 8
+    if weak_signals > strong_signals + 2:
+        return 3
+    return 5
 
 
 def _strip_code_fences(s: str) -> str:

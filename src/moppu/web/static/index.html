@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Moppu Monitor</title>
   <script src="https://cdn.jsdelivr.net/npm/marked@15/marked.min.js"></script>
-  <link rel="stylesheet" href="/static/style.css?v=9">
+  <link rel="stylesheet" href="/static/style.css?v=10">
 </head>
 <body>
 
@@ -45,9 +45,15 @@
       <div class="grid-2">
         <div class="card">
           <h3>자산 현황</h3>
-          <div class="stat-grid">
-            <div class="stat"><span class="stat-label">예수금</span><span class="stat-value" id="cash-balance">-</span></div>
-            <div class="stat"><span class="stat-label">총 평가금액</span><span class="stat-value" id="total-asset">-</span></div>
+          <div class="stat-grid" id="asset-summary-grid">
+            <div class="stat"><span class="stat-label">예수금</span><span class="stat-value" id="ov-cash">-</span></div>
+            <div class="stat"><span class="stat-label">주식 평가금액</span><span class="stat-value" id="ov-stock-eval">-</span></div>
+            <div class="stat"><span class="stat-label">총 평가금액</span><span class="stat-value" id="ov-total-eval">-</span></div>
+            <div class="stat"><span class="stat-label">매입 원가</span><span class="stat-value" id="ov-purchase">-</span></div>
+            <div class="stat"><span class="stat-label">평가 손익</span><span class="stat-value" id="ov-pl">-</span></div>
+            <div class="stat"><span class="stat-label">수익률</span><span class="stat-value" id="ov-pl-rate">-</span></div>
+          </div>
+          <div class="stat-grid" style="margin-top:10px;">
             <div class="stat"><span class="stat-label">투자 모드</span><span class="stat-value" id="ov-kis-mode">-</span></div>
             <div class="stat"><span class="stat-label">Dry Run</span><span class="stat-value" id="ov-dry-run">-</span></div>
           </div>
@@ -64,11 +70,11 @@
       </div>
 
       <div class="card">
-        <h3>보유 종목</h3>
+        <h3>보유 종목 <span style="font-size:.7rem;color:var(--text-muted);font-weight:400;">· 클릭 시 매매 이력 상세</span></h3>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>종목코드</th><th>수량</th><th>매입평균가</th><th>평가금액</th><th>평가손익</th><th>수익률</th></tr></thead>
-            <tbody id="positions-body"><tr><td colspan="6" class="text-muted">로딩 중...</td></tr></tbody>
+            <thead><tr><th>종목</th><th style="width:80px;text-align:right;">수량</th><th style="width:130px;text-align:right;">평가손익</th><th style="width:80px;text-align:right;">수익률</th></tr></thead>
+            <tbody id="positions-body"><tr><td colspan="4" class="text-muted">로딩 중...</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -105,7 +111,22 @@
         <div id="strategy-run-status" class="run-status" style="display:none;">
           <span id="strategy-run-msg" style="flex:1;font-size:.82rem;"></span>
           <button onclick="document.getElementById('strategy-run-status').style.display='none';"
-                  style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 4px;">×</button>
+                  style="background:none;border:none;color:inherit;cursor:pointer;font-size:.9rem;padding:0 4px;" title="닫기">×</button>
+        </div>
+        <!-- 실행 중 로그 스트림 (고정 높이, 스크롤) -->
+        <div id="strategy-log-panel" style="display:none;margin-top:10px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+            <span style="font-size:.76rem;color:var(--text-muted);font-weight:600;">실행 로그</span>
+            <div style="display:flex;gap:4px;">
+              <button id="btn-strategy-log-refresh" class="btn-icon" title="새로고침" aria-label="새로고침">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              </button>
+              <button id="btn-strategy-stop" class="btn-icon btn-icon-danger" title="중단" aria-label="중단">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1.5"/></svg>
+              </button>
+            </div>
+          </div>
+          <pre id="strategy-log-content" class="strategy-log-box"></pre>
         </div>
       </div>
 
@@ -145,6 +166,7 @@
             <button id="btn-pipeline-log" class="btn btn-secondary btn-sm">로그</button>
           </div>
         </div>
+        <div id="local-collector-status" class="local-status" style="margin-top:8px;"></div>
         <div id="pipeline-run-status" class="run-status" style="display:none;">
           <span id="pipeline-run-msg" style="flex:1;"></span>
           <button onclick="document.getElementById('pipeline-run-status').style.display='none';"
@@ -188,10 +210,11 @@
               <tr>
                 <th style="width:140px;">수집일시</th>
                 <th>제목</th>
+                <th style="width:90px;text-align:center;">상태</th>
               </tr>
             </thead>
             <tbody id="ingest-history-body">
-              <tr><td colspan="2" class="text-muted">로딩 중...</td></tr>
+              <tr><td colspan="3" class="text-muted">로딩 중...</td></tr>
             </tbody>
           </table>
         </div>
@@ -405,6 +428,38 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=12"></script>
+  <!-- ===== Position Detail Modal ===== -->
+  <div id="position-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <div>
+          <span class="modal-date" id="position-modal-ticker"></span>
+          <h3 style="margin:0;color:#e2e8f0;" id="position-modal-title">종목 매매 이력</h3>
+        </div>
+        <button class="modal-close" onclick="closeModal('position-modal')">&times;</button>
+      </div>
+      <div class="modal-body" id="position-modal-body">
+        <div class="modal-loading">로딩 중</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Strategy History (Failed) Log Modal ===== -->
+  <div id="strategy-log-modal" class="modal-overlay" style="display:none;">
+    <div class="modal modal-wide">
+      <div class="modal-header">
+        <div>
+          <span class="modal-date" id="strategy-log-modal-date"></span>
+          <h3 style="margin:0;color:#e2e8f0;" id="strategy-log-modal-title">전략 수립 실행 로그</h3>
+        </div>
+        <button class="modal-close" onclick="closeModal('strategy-log-modal')">&times;</button>
+      </div>
+      <div class="modal-body" id="strategy-log-modal-body">
+        <div class="modal-loading">로딩 중</div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js?v=13"></script>
 </body>
 </html>

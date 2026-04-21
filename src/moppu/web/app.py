@@ -48,6 +48,9 @@ _pipeline_running: bool = False
 _pipeline_run_msg: str = ""
 _deleted_embedding_count: int = 0
 _local_run_requested: bool = False   # 로컬 수집기 실행 요청 플래그
+_local_retry_video_ids: list[str] = []  # 로컬 수집기에 재시도 요청할 video_id 큐
+_local_last_heartbeat: datetime | None = None  # 로컬 수집기 마지막 폴링 시각
+LOCAL_HEARTBEAT_STALE_SEC: int = 300   # 5분 이상 폴링 없으면 연결 끊김으로 간주
 
 
 def _emergency_stop_path() -> Path:
@@ -162,8 +165,18 @@ async def index():
 def overview():
     assert _rt is not None
     data: dict[str, Any] = {
-        "cash_balance_krw": 0,
-        "total_eval_krw": 0,
+        "summary": {
+            "cash": 0,
+            "d2_cash": 0,
+            "stock_eval": 0,
+            "total_eval": 0,
+            "total_purchase": 0,
+            "eval_pl": 0,
+            "eval_pl_rate": 0,
+            "net_asset": 0,
+            "asset_change": 0,
+            "asset_change_rate": 0,
+        },
         "positions": [],
         "kis_mode": _rt.settings.kis_env,
         "dry_run": _rt.cfg.agent.dry_run,
@@ -173,27 +186,40 @@ def overview():
         data["broker_error"] = "브로커 미설정 (API 키 확인 필요)"
         return data
     try:
-        data["cash_balance_krw"] = _rt.broker.get_cash_balance_krw()
+        summary = _rt.broker.get_account_summary()
         positions = _rt.broker.get_positions()
         pos_list = []
-        total_eval = data["cash_balance_krw"]
         for p in positions:
             if p.name:
                 _ticker_name_cache[p.ticker] = p.name
-            eval_amt = p.avg_price * p.quantity + (p.unrealized_pl or 0)
-            total_eval += eval_amt
-            pl_rate = ((p.unrealized_pl or 0) / (p.avg_price * p.quantity) * 100) if p.avg_price * p.quantity > 0 else 0
+            cost_basis = p.avg_price * p.quantity
+            eval_amt = cost_basis + (p.unrealized_pl or 0)
+            pl_rate = ((p.unrealized_pl or 0) / cost_basis * 100) if cost_basis > 0 else 0
             pos_list.append({
                 "ticker": p.ticker,
                 "name": p.name,
                 "quantity": p.quantity,
                 "avg_price": p.avg_price,
                 "eval_amount": eval_amt,
+                "cost_basis": cost_basis,
                 "unrealized_pl": p.unrealized_pl or 0,
                 "pl_rate": round(pl_rate, 2),
             })
+        # 수익률 — 매입 기준
+        pl_rate = (summary.eval_pl / summary.total_purchase * 100) if summary.total_purchase > 0 else 0
+        data["summary"] = {
+            "cash": summary.cash,
+            "d2_cash": summary.d2_cash,
+            "stock_eval": summary.stock_eval,
+            "total_eval": summary.total_eval,
+            "total_purchase": summary.total_purchase,
+            "eval_pl": summary.eval_pl,
+            "eval_pl_rate": round(pl_rate, 2),
+            "net_asset": summary.net_asset,
+            "asset_change": summary.asset_change,
+            "asset_change_rate": summary.asset_change_rate,
+        }
         data["positions"] = pos_list
-        data["total_eval_krw"] = total_eval
     except Exception as e:
         err = str(e)
         if "500" in err:
@@ -205,6 +231,110 @@ def overview():
         else:
             data["broker_error"] = "계좌 조회 중 에러 발생"
     return data
+
+
+@app.get("/api/positions/{ticker}/trades")
+def position_trades(ticker: str, days: int = 90):
+    """종목별 매매 이력 — 모달 상세 팝업용. 실현손익·수익률도 집계."""
+    assert _rt is not None
+    if _rt.broker is None:
+        raise HTTPException(503, "브로커 미설정")
+
+    # 현재 보유 포지션 정보
+    pos_info: dict[str, Any] = {}
+    try:
+        for p in _rt.broker.get_positions():
+            if p.ticker == ticker:
+                cost_basis = p.avg_price * p.quantity
+                eval_amt = cost_basis + (p.unrealized_pl or 0)
+                pos_info = {
+                    "ticker": p.ticker,
+                    "name": p.name,
+                    "quantity": p.quantity,
+                    "avg_price": p.avg_price,
+                    "cost_basis": cost_basis,
+                    "eval_amount": eval_amt,
+                    "unrealized_pl": p.unrealized_pl or 0,
+                    "pl_rate": round(((p.unrealized_pl or 0) / cost_basis * 100) if cost_basis > 0 else 0, 2),
+                }
+                break
+    except Exception as e:
+        log.warning("position_trades.positions_failed", err=str(e))
+
+    # 매매 이력
+    try:
+        fills = _rt.broker.get_daily_trades(ticker=ticker, days=days)
+    except Exception as e:
+        raise HTTPException(500, f"매매 이력 조회 실패: {e}")
+
+    # 매도 체결에서 실현손익을 대략 계산 (KIS가 직접 주지 않으므로 평균매입가 기준)
+    # 오래된 매매일수록 정확도는 떨어지지만, 최근 매매 요약용으로는 충분.
+    trade_list = []
+    total_buy_qty = 0
+    total_buy_amt = 0.0
+    total_sell_qty = 0
+    total_sell_amt = 0.0
+    realized_pl = 0.0
+
+    # 시간순 정렬 (오래된 것부터) 후 평균가 추적
+    fills_sorted = sorted(fills, key=lambda f: (f.order_date, f.order_time))
+    running_qty = 0
+    running_cost = 0.0
+
+    for f in fills_sorted:
+        if f.filled_qty <= 0:
+            continue
+        if f.side == "BUY":
+            running_cost += f.avg_fill_price * f.filled_qty
+            running_qty += f.filled_qty
+            total_buy_qty += f.filled_qty
+            total_buy_amt += f.avg_fill_price * f.filled_qty
+            pl = 0.0
+            pl_rate = 0.0
+        else:  # SELL
+            avg_cost = (running_cost / running_qty) if running_qty > 0 else 0.0
+            pl = (f.avg_fill_price - avg_cost) * f.filled_qty
+            pl_rate = ((f.avg_fill_price - avg_cost) / avg_cost * 100) if avg_cost > 0 else 0.0
+            # 매도한 만큼 비용 차감
+            if running_qty > 0:
+                running_cost -= avg_cost * min(f.filled_qty, running_qty)
+                running_qty = max(0, running_qty - f.filled_qty)
+            realized_pl += pl
+            total_sell_qty += f.filled_qty
+            total_sell_amt += f.avg_fill_price * f.filled_qty
+        trade_list.append({
+            "date": f.order_date,
+            "time": f.order_time,
+            "side": f.side,
+            "quantity": f.quantity,
+            "filled_qty": f.filled_qty,
+            "avg_fill_price": f.avg_fill_price,
+            "total_amount": f.total_amount,
+            "status": f.status,
+            "pl": round(pl, 0),
+            "pl_rate": round(pl_rate, 2),
+            "is_win": pl > 0,
+        })
+
+    # 표시 시간순 (최신부터)
+    trade_list.reverse()
+
+    return {
+        "position": pos_info or {"ticker": ticker, "name": _ticker_name_cache.get(ticker)},
+        "trades": trade_list,
+        "stats": {
+            "total_trades": len(trade_list),
+            "buy_count": sum(1 for t in trade_list if t["side"] == "BUY"),
+            "sell_count": sum(1 for t in trade_list if t["side"] == "SELL"),
+            "total_buy_qty": total_buy_qty,
+            "total_buy_amt": total_buy_amt,
+            "total_sell_qty": total_sell_qty,
+            "total_sell_amt": total_sell_amt,
+            "realized_pl": round(realized_pl, 0),
+            "win_count": sum(1 for t in trade_list if t["side"] == "SELL" and t["is_win"]),
+            "loss_count": sum(1 for t in trade_list if t["side"] == "SELL" and not t["is_win"] and t["pl"] < 0),
+        },
+    }
 
 
 # -------------------------------------------------------------------- #
@@ -258,6 +388,7 @@ def pipeline_status():
         "pipeline_running": _pipeline_running,
         "pipeline_run_msg": _pipeline_run_msg,
         "deleted_embeddings": _deleted_embedding_count,
+        "local_collector": _local_connection_status(),
     }
 
 
@@ -281,14 +412,23 @@ def run_pipeline():
             _rt.pipeline.sync_video_lists()
             _write_pipeline_log("영상 목록 동기화 완료")
 
-            # 2) 로컬 수집기에 실행 신호
+            # 2) 로컬 수집기 연결 확인
+            conn = _local_connection_status()
+            if not conn["connected"]:
+                _pipeline_run_msg = "Local Machine Error — 로컬 수집기 연결 끊김"
+                _write_pipeline_log(f"[ERROR] {_pipeline_run_msg}")
+                return
+
+            # 3) 로컬 수집기에 실행 신호
             _local_run_requested = True
             _pipeline_run_msg = "로컬 수집기에 실행 신호 전송됨 (watch 모드 대기 중...)"
             _write_pipeline_log("[SIGNAL] 로컬 수집기 실행 요청 → /api/collect/poll 대기")
 
         except Exception as e:
-            _pipeline_run_msg = f"오류: {e}"
-            _write_pipeline_log(f"[ERROR] {e}")
+            # EC2 측 동작은 sync_video_lists 만 수행 — YouTube 접근 없음.
+            # 어떤 예외든 Local Machine Error 로 취급 (AWS IP 밴 방지).
+            _pipeline_run_msg = f"Local Machine Error — {e}"
+            _write_pipeline_log(f"[ERROR] Local Machine Error — {e}")
             log.error("pipeline.manual_run_failed", err=str(e))
         finally:
             _pipeline_running = False
@@ -929,6 +1069,8 @@ def get_video_detail(video_id: str):
 
 _strategy_running: bool = False
 _strategy_run_msg: str = ""
+_strategy_live_log: list[str] = []   # 실행 중 로그 스트림 (UI 스트리밍용)
+_strategy_stop_requested: bool = False   # 중단 요청 플래그
 
 
 def _strategy_history_dir() -> Path:
@@ -1029,28 +1171,12 @@ def run_strategy():
             data_dir=_rt.cfg.app.data_dir,
         )
 
-    def _save_error(err_str: str) -> None:
-        try:
-            hist_dir = _strategy_history_dir()
-            hist_dir.mkdir(parents=True, exist_ok=True)
-            from datetime import datetime as _dt
-            ts = _dt.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
-            (hist_dir / f"{ts}.json").write_text(
-                json.dumps({
-                    "run_at": _dt.now(KST).isoformat(),
-                    "dry_run": planner._cfg.dry_run,  # noqa: SLF001
-                    "error": err_str,
-                    "plan": {"sells": [], "buys": [], "summary": f"실행 실패: {err_str}"},
-                    "results": [],
-                }, ensure_ascii=False)
-            )
-        except Exception:
-            pass
-
     def _run() -> None:
         import os as _os
-        global _strategy_running, _strategy_run_msg
+        global _strategy_running, _strategy_run_msg, _strategy_live_log, _strategy_stop_requested
         _strategy_running = True
+        _strategy_stop_requested = False
+        _strategy_live_log = [f"[{datetime.now(KST).strftime('%H:%M:%S')}] 전략 수립 시작..."]
         _strategy_run_msg = "전략 수립 시작..."
         hist_dir = _strategy_history_dir()
         running_marker = hist_dir / "RUNNING.json"
@@ -1063,6 +1189,22 @@ def run_strategy():
             }, ensure_ascii=False))
         except Exception:
             pass
+
+        # planner.run() 은 내부에서 _append_log 로 self._log_lines 누적.
+        # 다른 스레드에서 그걸 읽어 라이브 로그로 노출.
+        import threading as _th
+        def _poll_log():
+            while _strategy_running:
+                try:
+                    lines = getattr(planner, "_log_lines", None)
+                    if lines:
+                        _strategy_live_log[:] = list(lines)
+                except Exception:
+                    pass
+                import time as _t
+                _t.sleep(0.5)
+        _th.Thread(target=_poll_log, daemon=True).start()
+
         try:
             result = planner.run()
             # broker 미설정 등 오류를 반환값으로 전달하는 경우
@@ -1081,13 +1223,87 @@ def run_strategy():
             err_str = str(e)
             _strategy_run_msg = f"오류: {err_str}"
             log.error("web.strategy_run_failed", err=err_str)
-            _save_error(err_str)
+            # planner.run() 이 로그를 갖고 있으면 그걸 포함하여 저장
+            log_text = "\n".join(getattr(planner, "_log_lines", []) or [])
+            _save_error_with_log(err_str, log_text)
         finally:
+            # 최종 로그 업데이트
+            try:
+                lines = getattr(planner, "_log_lines", None)
+                if lines:
+                    _strategy_live_log[:] = list(lines)
+            except Exception:
+                pass
             _strategy_running = False
             running_marker.unlink(missing_ok=True)
 
+    def _save_error_with_log(err_str: str, log_text: str) -> None:
+        try:
+            hist_dir = _strategy_history_dir()
+            hist_dir.mkdir(parents=True, exist_ok=True)
+            from datetime import datetime as _dt
+            ts = _dt.now(KST).strftime("%Y-%m-%d_%H-%M-%S")
+            (hist_dir / f"{ts}.json").write_text(
+                json.dumps({
+                    "run_at": _dt.now(KST).isoformat(),
+                    "dry_run": planner._cfg.dry_run,  # noqa: SLF001
+                    "error": err_str,
+                    "plan": {"sells": [], "buys": [], "summary": f"실행 실패: {err_str}"},
+                    "results": [],
+                    "log": log_text,
+                }, ensure_ascii=False)
+            )
+            if log_text:
+                (hist_dir / f"{ts}.log").write_text(log_text, encoding="utf-8")
+        except Exception:
+            pass
+
     threading.Thread(target=_run, daemon=True).start()
     return {"started": True, "message": "전략 수립을 시작했습니다."}
+
+
+@app.get("/api/strategy/live-log")
+def strategy_live_log():
+    """실행 중 전략 수립가의 라이브 로그 반환."""
+    return {
+        "running": _strategy_running,
+        "lines": _strategy_live_log[-500:],
+        "msg": _strategy_run_msg,
+    }
+
+
+@app.post("/api/strategy/stop")
+def stop_strategy():
+    """전략 수립 중단 요청 (best-effort — LLM 호출 중에는 즉시 중단 안 될 수 있음)."""
+    global _strategy_stop_requested
+    if not _strategy_running:
+        raise HTTPException(400, "실행 중인 전략 수립가가 없습니다.")
+    _strategy_stop_requested = True
+    return {"ok": True, "message": "중단 요청됨 (진행 중 단계 완료 후 종료)"}
+
+
+@app.get("/api/strategy/history/{filename}")
+def strategy_history_detail(filename: str):
+    """이력 개별 항목의 상세 (JSON + 실행 로그 파일)."""
+    import re as _re
+    # 경로 트래버설 방지
+    if not _re.fullmatch(r"[\w\-]+\.json", filename):
+        raise HTTPException(400, "invalid filename")
+    hist_dir = _strategy_history_dir()
+    path = hist_dir / filename
+    if not path.exists():
+        raise HTTPException(404, "이력을 찾을 수 없습니다.")
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        raise HTTPException(500, f"이력 파싱 실패: {e}")
+
+    # 별도 .log 파일이 있으면 병합
+    log_path = path.with_suffix(".log")
+    if log_path.exists():
+        data["log"] = log_path.read_text(encoding="utf-8")
+
+    return data
 
 
 @app.get("/api/strategy/history")
@@ -1149,7 +1365,12 @@ def strategy_history(page: int = 1, per_page: int = 10):
 
 @app.get("/api/collect/items")
 def collect_items():
-    """로컬 수집기가 수집해야 할 항목 목록 반환 (미완료 항목만)."""
+    """로컬 수집기가 수집해야 할 항목 목록 반환 (미완료 항목만).
+
+    ``retry_items`` 는 재시도 요청을 받은 특정 video_id 들. 로컬 수집기는
+    이들도 처리해야 한다 (기본 수집 로직과 독립된 경로).
+    """
+    global _local_retry_video_ids
     assert _rt is not None
 
     enabled_lists = {vl.name for vl in _rt.channels_cfg.video_lists if vl.enabled}
@@ -1172,6 +1393,19 @@ def collect_items():
 
         enabled_chs = s.query(Channel).filter_by(enabled=True).all()
 
+        # 재시도 대기 큐 — 기존 Video 레코드 정보 기반 source_type 포함
+        retry_items = []
+        for vid in list(_local_retry_video_ids):
+            v = s.query(Video).filter_by(video_id=vid).one_or_none()
+            if v is None:
+                continue
+            retry_items.append({
+                "video_id": vid,
+                "source_type": v.source_type or "channel",
+                "title": v.title,
+                "url": v.url or f"https://www.youtube.com/watch?v={vid}",
+            })
+
     channel_items = []
     for ch in enabled_chs:
         spec = next(
@@ -1189,6 +1423,7 @@ def collect_items():
     return {
         "video_list_items": pending_list,
         "channel_items": channel_items,
+        "retry_items": retry_items,
         "preferred_languages": _rt.cfg.ingestion.transcript_languages,
     }
 
@@ -1351,12 +1586,83 @@ def request_local_run():
 
 @app.get("/api/collect/poll")
 def poll_local_run():
-    """로컬 수집기가 주기적으로 호출 — 실행 요청 여부 확인 및 클리어."""
-    global _local_run_requested
+    """로컬 수집기가 주기적으로 호출 — 실행 요청·재시도 큐 확인 및 heartbeat 갱신."""
+    global _local_run_requested, _local_retry_video_ids, _local_last_heartbeat
+    _local_last_heartbeat = datetime.now(timezone.utc)
     requested = _local_run_requested
+    retry_ids = list(_local_retry_video_ids)
     if requested:
         _local_run_requested = False
-    return {"requested": requested}
+    if retry_ids:
+        _local_retry_video_ids = []
+    return {
+        "requested": requested,
+        "retry_video_ids": retry_ids,
+    }
+
+
+def _local_connection_status() -> dict[str, Any]:
+    """로컬 수집기 연결 상태를 반환."""
+    if _local_last_heartbeat is None:
+        return {"connected": False, "last_seen": None, "stale_sec": None}
+    delta = (datetime.now(timezone.utc) - _local_last_heartbeat).total_seconds()
+    return {
+        "connected": delta < LOCAL_HEARTBEAT_STALE_SEC,
+        "last_seen": _local_last_heartbeat.isoformat(),
+        "stale_sec": round(delta),
+    }
+
+
+@app.get("/api/collect/status")
+def collect_status():
+    """로컬 수집기 상태 (대시보드 상단 표시용)."""
+    return _local_connection_status()
+
+
+class RetryVideoRequest(BaseModel):
+    video_id: str
+
+
+@app.post("/api/pipeline/retry/{video_id}")
+def retry_failed_video(video_id: str):
+    """실패한 영상 1건 재시도 — 로컬 수집기에 신호 전달.
+
+    - 영상 상태가 failed 가 아닌 경우 400
+    - 로컬 수집기 연결 끊김이면 503 (Local Machine Error)
+    """
+    global _local_retry_video_ids
+    assert _rt is not None
+    with _rt.session_factory() as s:
+        v = s.query(Video).filter_by(video_id=video_id).one_or_none()
+        if v is None:
+            raise HTTPException(404, "영상을 찾을 수 없습니다.")
+        if v.status != "failed":
+            raise HTTPException(400, f"재시도는 실패 상태에서만 가능합니다 (현재: {v.status}).")
+
+        # 이전 임베딩·transcript 제거 (있다면)
+        if v.transcript:
+            old_eids = [c.embedding_id for c in v.transcript.chunks if c.embedding_id]
+            if old_eids:
+                try:
+                    _rt.vector_store.delete(old_eids)
+                except Exception as e:
+                    log.warning("retry.vector_delete_failed", err=str(e))
+            s.delete(v.transcript)
+        v.status = "pending"
+        v.error = None
+        s.commit()
+
+    conn = _local_connection_status()
+    if not conn["connected"]:
+        raise HTTPException(
+            503,
+            "Local Machine Error — 로컬 수집기에 연결할 수 없습니다. 수집 머신을 확인하세요.",
+        )
+
+    if video_id not in _local_retry_video_ids:
+        _local_retry_video_ids.append(video_id)
+    _write_pipeline_log(f"[RETRY] {video_id} — 로컬 수집기에 재시도 요청")
+    return {"ok": True, "message": f"{video_id} 재시도 요청됨"}
 
 
 @app.post("/api/collect/process")

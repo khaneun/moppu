@@ -172,61 +172,56 @@ def bot() -> None:
 
 @app.command("scheduler")
 def scheduler() -> None:
-    """Run APScheduler in-process to poll channels on a cron."""
+    """Run APScheduler in-process on KST.
+
+    **주의**: EC2 에서 YouTube 에 직접 접근하는 job 은 생성하지 않는다.
+    로컬 수집기가 YouTube 수집을 담당하므로, 자정 job 은 로컬 수집기에
+    실행 신호만 보내고 요약 생성을 대기한다.
+    """
+    from zoneinfo import ZoneInfo
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
 
+    KST = ZoneInfo("Asia/Seoul")
     rt = build_runtime()
     stop_file = rt.cfg.app.data_dir / ".emergency_stop"
 
-    def guarded(fn):
-        def wrapper():
-            if stop_file.exists():
-                typer.echo("  [SKIP] emergency stop active")
-                return
-            return fn()
-        return wrapper
-
-    def upload_day_job():
-        """Poll upload-day channels, then generate daily summary."""
+    def upload_day_job() -> None:
+        """자정 자동 실행 — 로컬 수집기에 실행 신호만 송신."""
         if stop_file.exists():
             typer.echo("  [SKIP] emergency stop active")
             return
         from datetime import datetime as _dt
-        today_str = _dt.now().strftime("%Y-%m-%d")
         log_file = rt.cfg.app.data_dir / "pipeline.log"
 
         def wlog(msg: str) -> None:
-            ts = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+            ts = _dt.now(KST).strftime("%Y-%m-%d %H:%M:%S")
+            log_file.parent.mkdir(parents=True, exist_ok=True)
             with open(log_file, "a", encoding="utf-8") as _f:
                 _f.write(f"[{ts}] [SCHEDULER] {msg}\n")
 
-        # 수동 실행 마커가 있으면 당일 자정 자동 실행 건너뜀
-        ran_file = rt.cfg.app.data_dir / f".pipeline_ran_{today_str}"
-        if ran_file.exists():
-            wlog(f"[SKIP] 오늘 이미 수동 실행됨 ({today_str})")
-            typer.echo(f"  [SKIP] 오늘 이미 수동 실행됨 ({today_str})")
-            return
-        wlog("=== 자동 실행 시작 (upload_day_poll) ===")
-        n = rt.pipeline.poll_upload_day_channels()
-        wlog(f"수집 완료: {n}건")
-        if n > 0:
-            wlog("요약 생성 중...")
-            _try_generate_summary(rt)
-            wlog("요약 생성 완료")
-        wlog("=== 자동 실행 완료 ===")
+        wlog("=== 자정 자동 실행 시작 — 로컬 수집기 신호 ===")
+        # EC2 에서는 YouTube 를 절대 호출하지 않음. 로컬 수집기에 신호만 전달.
+        try:
+            rt.pipeline.sync_video_lists()
+            wlog("video_list 동기화 완료")
+        except Exception as e:
+            wlog(f"[ERROR] sync_video_lists 실패: {e}")
+        # 로컬 수집기 실행 요청 플래그는 웹 프로세스가 관리하므로 스케줄러에서
+        # 트리거할 방법은 없다. 로컬 수집기는 자체 KST 자정 타이머로 동작한다.
+        wlog("=== 로컬 수집기 자체 타이머로 수집 진행 ===")
 
-    sched = BlockingScheduler()
-
-    cron = rt.cfg.scheduler.poll_channels_cron
-    sched.add_job(guarded(rt.pipeline.poll_new), CronTrigger.from_crontab(cron), id="poll_channels")
-    typer.echo(f"  poll_channels   : {cron}")
+    sched = BlockingScheduler(timezone=KST)
 
     upload_day_cron = rt.cfg.scheduler.upload_day_cron
-    sched.add_job(upload_day_job, CronTrigger.from_crontab(upload_day_cron), id="upload_day_poll")
-    typer.echo(f"  upload_day_poll : {upload_day_cron}")
+    sched.add_job(
+        upload_day_job,
+        CronTrigger.from_crontab(upload_day_cron, timezone=KST),
+        id="upload_day_poll",
+    )
+    typer.echo(f"  upload_day_poll : {upload_day_cron} (KST)")
 
-    # 전략 수립가 스케줄 (설정에서 enabled=true 일 때만)
+    # 전략 수립가 스케줄 (설정에서 enabled=true 일 때만) — KST 기준
     sp_cfg = rt.cfg.strategy_planner
     if sp_cfg.enabled:
         from moppu.agent.strategy_planner import StrategyPlannerAgent
@@ -238,6 +233,7 @@ def scheduler() -> None:
                 llm=rt.llm,
                 trader_agent=rt.agent,
                 broker=rt.broker,
+                data_dir=rt.cfg.app.data_dir,
             )
         planner = rt.strategy_planner
 
@@ -245,7 +241,7 @@ def scheduler() -> None:
             if stop_file.exists():
                 typer.echo("  [SKIP] emergency stop active (strategy_planner)")
                 return
-            typer.echo("  [strategy_planner] 전략 수립 시작...")
+            typer.echo("  [strategy_planner] 전략 수립 시작 (KST)...")
             try:
                 planner.run()
             except Exception as e:
@@ -253,14 +249,14 @@ def scheduler() -> None:
 
         sched.add_job(
             strategy_job,
-            CronTrigger.from_crontab(sp_cfg.cron),
+            CronTrigger.from_crontab(sp_cfg.cron, timezone=KST),
             id="strategy_planner",
         )
-        typer.echo(f"  strategy_planner: {sp_cfg.cron} (dry_run={sp_cfg.dry_run})")
+        typer.echo(f"  strategy_planner: {sp_cfg.cron} (KST, dry_run={sp_cfg.dry_run})")
     else:
         typer.echo("  strategy_planner: disabled (config: strategy_planner.enabled=false)")
 
-    typer.echo("Scheduler started. Ctrl-C to stop.")
+    typer.echo("Scheduler started (timezone=Asia/Seoul). Ctrl-C to stop.")
     sched.start()
 
 

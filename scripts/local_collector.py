@@ -390,8 +390,18 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
 
     video_list_items: list[dict] = items_data.get("video_list_items", [])
     channel_items:    list[dict] = items_data.get("channel_items", [])
+    retry_items:      list[dict] = items_data.get("retry_items", [])
 
     tasks: list[dict[str, Any]] = []
+
+    # 0) 재시도 요청 — 특정 video_id (날짜/채널 필터 무시)
+    for item in retry_items:
+        tasks.append({
+            "video_id":    item["video_id"],
+            "source_type": item.get("source_type", "channel"),
+            "url":         item.get("url"),
+            "title":       item.get("title"),
+        })
 
     # 1) 영상 목록 항목 (video_lists)
     for item in video_list_items:

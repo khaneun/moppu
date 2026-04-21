@@ -140,13 +140,30 @@ document.querySelectorAll('.tab').forEach(btn => {
 // Overview Tab
 // ================================================================== //
 
+let _positionRows = [];  // 클릭 핸들러용 — 매 렌더 시 초기화
+
 async function loadOverview() {
   try {
     const data = await API.get('/api/overview');
-    document.getElementById('cash-balance').textContent = krw(data.cash_balance_krw);
-    document.getElementById('total-asset').textContent  = krw(data.total_eval_krw);
-    document.getElementById('ov-kis-mode').textContent  = data.kis_mode === 'real' ? '실전' : '모의';
-    document.getElementById('ov-dry-run').textContent   = data.dry_run ? 'ON' : 'OFF';
+    const s = data.summary || {};
+    document.getElementById('ov-cash').textContent       = krw(s.cash);
+    document.getElementById('ov-stock-eval').textContent = krw(s.stock_eval);
+    document.getElementById('ov-total-eval').textContent = krw(s.total_eval);
+    document.getElementById('ov-purchase').textContent   = krw(s.total_purchase);
+
+    const plEl  = document.getElementById('ov-pl');
+    const rateEl = document.getElementById('ov-pl-rate');
+    const pl = s.eval_pl || 0;
+    const rate = s.eval_pl_rate || 0;
+    const cls = pl >= 0 ? 'pl-positive' : 'pl-negative';
+    const sign = pl >= 0 ? '+' : '';
+    plEl.textContent  = `${sign}${krw(pl)}`;
+    plEl.className = 'stat-value ' + cls;
+    rateEl.textContent = `${sign}${rate.toFixed(2)}%`;
+    rateEl.className = 'stat-value ' + cls;
+
+    document.getElementById('ov-kis-mode').textContent = data.kis_mode === 'real' ? '실전' : '모의';
+    document.getElementById('ov-dry-run').textContent  = data.dry_run ? 'ON' : 'OFF';
     updateGlobalStatus(data.emergency_stopped, data.kis_mode);
 
     const errEl = document.getElementById('broker-error');
@@ -154,17 +171,23 @@ async function loadOverview() {
     else errEl.style.display = 'none';
 
     const tbody = document.getElementById('positions-body');
+    _positionRows = [];
     if (!data.positions || !data.positions.length) {
-      tbody.innerHTML = '<tr><td colspan="6" class="text-muted">보유 종목 없음</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="4" class="text-muted">보유 종목 없음</td></tr>';
     } else {
       tbody.innerHTML = data.positions.map(p => {
-        const cls = p.unrealized_pl >= 0 ? 'pl-positive' : 'pl-negative';
-        const sign = p.unrealized_pl >= 0 ? '+' : '';
-        return `<tr>
-          <td>${p.name ? escHtml(p.name) + '<br><span style="font-size:.75rem;color:var(--text-muted);">' + escHtml(p.ticker) + '</span>' : escHtml(p.ticker)}</td><td>${p.quantity}</td>
-          <td>${krw(p.avg_price)}</td><td>${krw(p.eval_amount)}</td>
-          <td class="${cls}">${sign}${krw(p.unrealized_pl)}</td>
-          <td class="${cls}">${sign}${p.pl_rate}%</td>
+        const idx = _positionRows.length;
+        _positionRows.push(p);
+        const plCls = p.unrealized_pl >= 0 ? 'pl-positive' : 'pl-negative';
+        const plSign = p.unrealized_pl >= 0 ? '+' : '';
+        const label = p.name
+          ? `${escHtml(p.name)} <span style="color:var(--text-muted);font-size:.72rem;">(${escHtml(p.ticker)})</span>`
+          : escHtml(p.ticker);
+        return `<tr class="clickable-row" data-pos-idx="${idx}">
+          <td>${label}</td>
+          <td style="text-align:right;">${p.quantity.toLocaleString('ko-KR')}</td>
+          <td class="${plCls}" style="text-align:right;">${plSign}${krw(p.unrealized_pl)}</td>
+          <td class="${plCls}" style="text-align:right;">${plSign}${p.pl_rate}%</td>
         </tr>`;
       }).join('');
     }
@@ -172,6 +195,114 @@ async function loadOverview() {
 
   loadSummaryList(1);
 }
+
+// 보유 종목 클릭 → 매매 이력 팝업
+document.getElementById('positions-body').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-pos-idx]');
+  if (!tr) return;
+  const p = _positionRows[+tr.dataset.posIdx];
+  if (p) openPositionDetail(p);
+});
+
+async function openPositionDetail(pos) {
+  const modal = document.getElementById('position-modal');
+  const body  = document.getElementById('position-modal-body');
+  const tickerEl = document.getElementById('position-modal-ticker');
+  const titleEl  = document.getElementById('position-modal-title');
+
+  tickerEl.textContent = pos.ticker || '';
+  titleEl.textContent = pos.name ? `${pos.name} 매매 이력` : `${pos.ticker} 매매 이력`;
+  body.innerHTML = '<div class="modal-loading">로딩 중</div>';
+  modal.style.display = 'flex';
+
+  try {
+    const d = await API.get(`/api/positions/${encodeURIComponent(pos.ticker)}/trades?days=90`);
+    _renderPositionDetail(body, d);
+  } catch (e) {
+    body.innerHTML = `<p class="text-warn">${escHtml(e.message || '조회 실패')}</p>`;
+  }
+}
+
+function _renderPositionDetail(body, d) {
+  const p = d.position || {};
+  const st = d.stats || {};
+  const trades = d.trades || [];
+
+  const plCls = (p.unrealized_pl || 0) >= 0 ? 'pl-positive' : 'pl-negative';
+  const plSign = (p.unrealized_pl || 0) >= 0 ? '+' : '';
+  const rpCls = (st.realized_pl || 0) >= 0 ? 'pl-positive' : 'pl-negative';
+  const rpSign = (st.realized_pl || 0) >= 0 ? '+' : '';
+
+  const statsHtml = `
+    <div class="position-stat-grid">
+      <div class="stat">
+        <span class="stat-label">보유 수량</span>
+        <span class="stat-value">${(p.quantity || 0).toLocaleString('ko-KR')}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">평균 매입가</span>
+        <span class="stat-value">${krw(p.avg_price)}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">현재 평가금액</span>
+        <span class="stat-value">${krw(p.eval_amount)}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">미실현 손익</span>
+        <span class="stat-value ${plCls}">${plSign}${krw(p.unrealized_pl)} (${plSign}${p.pl_rate || 0}%)</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">실현 손익(근사)</span>
+        <span class="stat-value ${rpCls}">${rpSign}${krw(st.realized_pl)}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">승/패</span>
+        <span class="stat-value">${st.win_count || 0}승 ${st.loss_count || 0}패</span>
+      </div>
+    </div>
+  `;
+
+  let tradesHtml = '';
+  if (!trades.length) {
+    tradesHtml = '<p class="text-muted" style="font-size:.85rem;text-align:center;padding:30px 0;">최근 90일 매매 이력이 없습니다.</p>';
+  } else {
+    tradesHtml = `
+      <h4 style="margin-bottom:8px;">최근 매매 이력 (${trades.length}건)</h4>
+      <div class="trade-list">
+        <div class="trade-row" style="font-weight:600;color:var(--text-muted);font-size:.72rem;border-bottom:1px solid var(--border-2);">
+          <span>일시</span><span>구분</span><span style="text-align:right;">수량</span><span style="text-align:right;">체결단가</span><span style="text-align:right;">체결금액</span><span style="text-align:right;">손익</span>
+        </div>
+        ${trades.map(t => {
+          const dateStr = t.date ? `${t.date.slice(0,4)}-${t.date.slice(4,6)}-${t.date.slice(6,8)}` : '';
+          const timeStr = t.time && t.time.length >= 6 ? `${t.time.slice(0,2)}:${t.time.slice(2,4)}` : '';
+          const sideCls = t.side === 'BUY' ? 't-side-buy' : 't-side-sell';
+          const sideLabel = t.side === 'BUY' ? '매수' : '매도';
+          const statusSuffix = t.status === 'cancelled' ? ' (취소)' : t.status === 'partial' ? ' (부분)' : '';
+          const plCell = t.side === 'SELL' && t.status !== 'cancelled'
+            ? `<span class="${t.is_win ? 't-win' : 't-loss'}">${t.pl >= 0 ? '+' : ''}${krw(t.pl)}<br><span style="font-size:.7rem;">${t.pl_rate >= 0 ? '+' : ''}${t.pl_rate}%</span></span>`
+            : '<span style="color:var(--text-muted);">-</span>';
+          return `<div class="trade-row ${t.status === 'cancelled' ? 't-status-cancelled' : ''}">
+            <span style="font-size:.75rem;">${dateStr}<br><span style="color:var(--text-muted);font-size:.7rem;">${timeStr}</span></span>
+            <span class="t-side ${sideCls}">${sideLabel}${statusSuffix}</span>
+            <span style="text-align:right;">${(t.filled_qty || 0).toLocaleString('ko-KR')}</span>
+            <span style="text-align:right;">${krw(t.avg_fill_price)}</span>
+            <span style="text-align:right;">${krw(t.total_amount)}</span>
+            <span style="text-align:right;">${plCell}</span>
+          </div>`;
+        }).join('')}
+      </div>
+      <p style="font-size:.7rem;color:var(--text-muted);margin-top:8px;">
+        * 실현 손익은 평균 매입가 기준으로 계산된 근사치입니다.
+      </p>
+    `;
+  }
+
+  body.innerHTML = statsHtml + tradesHtml;
+}
+
+document.getElementById('position-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('position-modal')) closeModal('position-modal');
+});
 
 // ---- Summary list ----
 
@@ -387,6 +518,21 @@ async function loadPipeline() {
       API.get('/api/channels'),
     ]);
 
+    // Local Machine 연결 상태 — 헤더 바로 아래에 표시
+    const localEl = document.getElementById('local-collector-status');
+    if (localEl) {
+      const lc = data.local_collector || {};
+      if (lc.connected) {
+        const s = lc.stale_sec;
+        localEl.className = 'local-status connected';
+        localEl.innerHTML = `<span class="ls-dot"></span> 로컬 수집기 연결됨 <span style="color:var(--text-muted);font-size:.72rem;">(${s}초 전 응답)</span>`;
+      } else {
+        localEl.className = 'local-status disconnected';
+        const last = lc.last_seen ? formatKoreanDateTime(lc.last_seen) : '없음';
+        localEl.innerHTML = `<span class="ls-dot"></span> <strong>Local Machine Error</strong> — 로컬 수집기 연결 끊김 <span style="color:var(--text-muted);font-size:.72rem;">(최근: ${escHtml(last)})</span>`;
+      }
+    }
+
     // 실행 상태 표시
     const runStatusEl = document.getElementById('pipeline-run-status');
     const runMsgEl    = document.getElementById('pipeline-run-msg');
@@ -398,7 +544,7 @@ async function loadPipeline() {
       if (!_pipelinePolling) _pipelinePolling = setInterval(loadPipeline, 2000);
     } else if (data.pipeline_run_msg) {
       const isWaiting = data.pipeline_run_msg.includes('대기 중');
-      const isErr     = data.pipeline_run_msg.startsWith('오류');
+      const isErr     = data.pipeline_run_msg.startsWith('오류') || data.pipeline_run_msg.includes('Error');
       runStatusEl.style.display = 'flex';
       runStatusEl.className = 'run-status ' + (isErr ? 'error' : (isWaiting ? '' : 'done'));
       runMsgEl.innerHTML = isWaiting
@@ -469,7 +615,7 @@ async function loadIngestionHistory(page) {
   try {
     const data = await API.get(`/api/pipeline/ingestion-history?page=${page}&per_page=10`);
     if (!data.items || !data.items.length) {
-      tbody.innerHTML = '<tr><td colspan="2" class="text-muted" style="text-align:center;padding:20px;">수집 이력이 없습니다.</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="3" class="text-muted" style="text-align:center;padding:20px;">수집 이력이 없습니다.</td></tr>';
       pagEl.innerHTML = '';
       return;
     }
@@ -477,9 +623,15 @@ async function loadIngestionHistory(page) {
     tbody.innerHTML = data.items.map(v => {
       const dt = v.created_at ? formatDateTimeTwoLine(v.created_at) : '-';
       const title = trunc(v.title || v.video_id, 48);
+      const badge = v.status === 'embedded'
+        ? '<span class="ingest-badge ingest-badge-embedded">완료</span>'
+        : v.status === 'failed'
+          ? '<span class="ingest-badge ingest-badge-failed">실패</span>'
+          : '<span class="ingest-badge ingest-badge-pending">대기</span>';
       return `<tr class="clickable-row" data-vid="${escHtml(v.video_id)}">
         <td style="font-size:.76rem;width:140px;">${dt}</td>
         <td style="font-size:.82rem;">${escHtml(title)}</td>
+        <td style="text-align:center;">${badge}</td>
       </tr>`;
     }).join('');
 
@@ -497,7 +649,7 @@ async function loadIngestionHistory(page) {
       pagEl.innerHTML = '';
     }
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="2" class="text-warn">${escHtml(e.message)}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="3" class="text-warn">${escHtml(e.message)}</td></tr>`;
     pagEl.innerHTML = '';
   }
 }
@@ -909,27 +1061,53 @@ async function loadStrategyConfig() {
 
 async function _pollStrategyStatus() {
   try {
-    const data = await API.get('/api/strategy/config');
-    if (data.running) {
+    // 라이브 로그 + 상태 한 번에 조회
+    const liveData = await API.get('/api/strategy/live-log');
+    _renderStrategyLivePanel(liveData);
+    if (liveData.running) {
       if (_strategyLiveItem) _strategyLiveItem.status = 'running';
-      _showStrategyStatus(data.last_msg || '전략 수립 진행 중...', 'running');
+      _showStrategyStatus(liveData.msg || '전략 수립 진행 중...', 'running');
       _renderStrategyHistory(null);
     } else {
       if (_strategyPolling) { clearInterval(_strategyPolling); _strategyPolling = null; }
-      const isErr = (data.last_msg || '').startsWith('오류');
+      const isErr = (liveData.msg || '').startsWith('오류');
       if (_strategyLiveItem) {
         _strategyLiveItem.status = isErr ? 'error' : 'completed';
-        _strategyLiveItem.error  = isErr ? data.last_msg : null;
+        _strategyLiveItem.error  = isErr ? liveData.msg : null;
         _renderStrategyHistory(null);
       }
-      _showStrategyStatus(data.last_msg || '', isErr ? 'error' : 'done');
-      // 완료되면 실제 이력 다시 로드 (파일이 저장됐을 것)
+      _showStrategyStatus(liveData.msg || '', isErr ? 'error' : 'done');
+      // 실행 종료되면 실제 이력 다시 로드 (파일이 저장됐을 것)
       setTimeout(() => {
         _strategyLiveItem = null;
         loadStrategyHistory(1);
+        // 완료 후 로그 패널은 5초 후 자동 숨김
+        setTimeout(() => {
+          const panel = document.getElementById('strategy-log-panel');
+          if (panel && !_strategyRunning()) panel.style.display = 'none';
+        }, 5000);
       }, 1500);
     }
   } catch (_) {}
+}
+
+function _strategyRunning() {
+  const el = document.getElementById('strategy-run-status');
+  return el && el.classList.contains('run-status') && !el.classList.contains('done');
+}
+
+function _renderStrategyLivePanel(data) {
+  const panel = document.getElementById('strategy-log-panel');
+  const content = document.getElementById('strategy-log-content');
+  if (!panel || !content) return;
+  const lines = data.lines || [];
+  panel.style.display = (lines.length || data.running) ? 'block' : panel.style.display;
+  const text = lines.join('\n') || (data.running ? '(로그 수집 중...)' : '(로그 없음)');
+  if (content.textContent !== text) {
+    content.textContent = text;
+    // 자동 스크롤
+    content.scrollTop = content.scrollHeight;
+  }
 }
 
 function _showStrategyStatus(msg, state) {
@@ -960,7 +1138,8 @@ function _renderStrategyHistoryRow(item) {
     ? '<span class="strategy-badge strategy-badge-dry">DRY</span>'
     : '<span class="strategy-badge strategy-badge-sell">실거래</span>';
 
-  const clickable = isCompleted;
+  // 완료·실패 모두 클릭 가능 (running 만 제외)
+  const clickable = isCompleted || isError;
   let trAttrs = '';
   if (clickable) {
     const idx = _strategyRows.length;
@@ -1008,16 +1187,41 @@ document.getElementById('btn-strategy-run').addEventListener('click', async () =
   _renderStrategyHistory([]);
   _showStrategyStatus('전략 수립 요청 중...', 'running');
 
+  // 즉시 로그 패널 표시
+  const panel = document.getElementById('strategy-log-panel');
+  const content = document.getElementById('strategy-log-content');
+  if (panel) panel.style.display = 'block';
+  if (content) content.textContent = '대기 중...';
+
   try {
     await API.post('/api/strategy/run', {});
     _showStrategyStatus('전략 수립 진행 중...', 'running');
-    if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 3000);
+    if (!_strategyPolling) _strategyPolling = setInterval(_pollStrategyStatus, 1500);
+    // 즉시 한 번 폴링해서 빠르게 첫 로그 표시
+    _pollStrategyStatus();
   } catch (e) {
     // API 실패 시 live item을 오류 상태로 전환
     _strategyLiveItem.status = 'error';
     _strategyLiveItem.error = e.message || '실행 요청 실패';
     _renderStrategyHistory([]);
     _showStrategyStatus(e.message || '실행 요청 실패', 'error');
+  }
+  btn.disabled = false;
+});
+
+// 로그 패널: 새로고침
+document.getElementById('btn-strategy-log-refresh').addEventListener('click', _pollStrategyStatus);
+
+// 로그 패널: 중단
+document.getElementById('btn-strategy-stop').addEventListener('click', async () => {
+  if (!confirm('전략 수립 실행을 중단하시겠습니까?\n(진행 중 단계 완료 후 종료됨)')) return;
+  const btn = document.getElementById('btn-strategy-stop');
+  btn.disabled = true;
+  try {
+    await API.post('/api/strategy/stop', {});
+    _showStrategyStatus('중단 요청됨 — 진행 중 단계 완료 후 종료', 'running');
+  } catch (e) {
+    alert(e.message || '중단 요청 실패');
   }
   btn.disabled = false;
 });
@@ -1062,7 +1266,46 @@ document.getElementById('strategy-history-body').addEventListener('click', (e) =
   const tr = e.target.closest('tr[data-strategy-idx]');
   if (!tr) return;
   const item = _strategyRows[+tr.dataset.strategyIdx];
-  if (item) openStrategyDetail(JSON.stringify(item));
+  if (!item) return;
+  if (item.status === 'error') {
+    openStrategyFailedDetail(item);
+  } else if (item.status === 'completed') {
+    openStrategyDetail(item);
+  }
+});
+
+async function openStrategyFailedDetail(item) {
+  const modal = document.getElementById('strategy-log-modal');
+  const body  = document.getElementById('strategy-log-modal-body');
+  const dateEl = document.getElementById('strategy-log-modal-date');
+  dateEl.textContent = item.run_at ? formatKoreanDateTime(item.run_at) : '';
+  body.innerHTML = '<div class="modal-loading">로딩 중</div>';
+  modal.style.display = 'flex';
+  try {
+    let detail = item;
+    // filename 이 있으면 서버에서 완전한 로그까지 불러온다
+    if (item.filename) {
+      detail = await API.get(`/api/strategy/history/${encodeURIComponent(item.filename)}`);
+    }
+    const err = escHtml(detail.error || item.error || '알 수 없는 오류');
+    const logText = detail.log || '(실행 로그가 저장되지 않았습니다)';
+    body.innerHTML = `
+      <div style="padding:10px 12px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.3);border-radius:6px;margin-bottom:14px;">
+        <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:4px;">오류 메시지</p>
+        <p style="color:var(--danger);font-size:.88rem;font-weight:500;">${err}</p>
+      </div>
+      <h4 style="margin-bottom:8px;">실행 로그</h4>
+      <pre class="strategy-log-box" style="height:320px;">${escHtml(logText)}</pre>
+    `;
+    const pre = body.querySelector('.strategy-log-box');
+    if (pre) pre.scrollTop = pre.scrollHeight;
+  } catch (e) {
+    body.innerHTML = `<p class="text-warn">${escHtml(e.message || '조회 실패')}</p>`;
+  }
+}
+
+document.getElementById('strategy-log-modal').addEventListener('click', (e) => {
+  if (e.target === document.getElementById('strategy-log-modal')) closeModal('strategy-log-modal');
 });
 
 async function loadStrategyHistory(page) {
@@ -1095,35 +1338,44 @@ async function loadStrategyHistory(page) {
   }
 }
 
-function openStrategyDetail(itemJson) {
-  const item = JSON.parse(itemJson);
-  if (item.status === 'running' || item.status === 'error') return;
+function openStrategyDetail(item) {
+  if (typeof item === 'string') { try { item = JSON.parse(item); } catch(_){} }
+  if (!item || item.status === 'running') return;
   document.getElementById('strategy-modal-date').textContent = item.run_at ? formatKoreanDateTime(item.run_at) : '';
 
   const sectorsAdd    = (item.sectors_to_add    || []).map(s => `<span class="sector-tag add">${escHtml(s)}</span>`).join('');
   const sectorsReduce = (item.sectors_to_reduce || []).map(s => `<span class="sector-tag reduce">${escHtml(s)}</span>`).join('');
 
-  const sells = (item.sells || []).map(s =>
-    `<div class="strategy-trade-row">
-      <span class="trade-side-sell">SELL</span>
-      <span style="font-weight:600;">${s.name ? escHtml(s.name) + '(' + escHtml(s.ticker) + ')' : escHtml(s.ticker)}</span>
-      <span style="color:var(--text-muted);font-size:.78rem;">${s.quantity < 0 ? '전량' : s.quantity + '주'}</span>
-      <span style="flex:1;color:var(--text-muted);font-size:.78rem;">${escHtml(trunc(s.reason || '', 80))}</span>
-    </div>`
-  ).join('') || '<p class="text-muted" style="font-size:.8rem;">매도 없음</p>';
+  // 매도/매수를 2줄 포맷으로 — 첫 줄: 종목+수량, 둘째 줄: 사유(줄글 전체)
+  const renderSell = (s) => `
+    <div class="strategy-trade-row-wrap">
+      <span class="side-badge trade-side-sell">SELL</span>
+      <div>
+        <div class="ticker-line">${s.name ? escHtml(s.name) + '(' + escHtml(s.ticker) + ')' : escHtml(s.ticker)}</div>
+        <div class="reason-line">${escHtml(s.reason || '')}</div>
+      </div>
+      <span class="qty-line">${s.quantity < 0 ? '전량' : s.quantity + '주'}</span>
+    </div>`;
+  const renderBuy = (b) => `
+    <div class="strategy-trade-row-wrap">
+      <span class="side-badge trade-side-buy">BUY</span>
+      <div>
+        <div class="ticker-line">${b.name ? escHtml(b.name) + '(' + escHtml(b.ticker) + ')' : escHtml(b.ticker)}</div>
+        <div class="reason-line">${escHtml(b.reason || '')}</div>
+      </div>
+      <span class="qty-line">${b.quantity}주 × ${b.price ? Math.round(b.price).toLocaleString('ko-KR') + '원' : '-'}</span>
+    </div>`;
 
-  const buys = (item.buys || []).map(b =>
-    `<div class="strategy-trade-row">
-      <span class="trade-side-buy">BUY</span>
-      <span style="font-weight:600;">${b.name ? escHtml(b.name) + '(' + escHtml(b.ticker) + ')' : escHtml(b.ticker)}</span>
-      <span style="color:var(--text-muted);font-size:.78rem;">${b.quantity}주 × ${b.price ? Math.round(b.price).toLocaleString('ko-KR') + '원' : '-'}</span>
-      <span style="flex:1;color:var(--text-muted);font-size:.78rem;">${escHtml(trunc(b.reason || '', 80))}</span>
-    </div>`
-  ).join('') || '<p class="text-muted" style="font-size:.8rem;">매수 없음</p>';
+  const sells = (item.sells || []).map(renderSell).join('') || '<p class="text-muted" style="font-size:.8rem;">매도 없음</p>';
+  const buys  = (item.buys || []).map(renderBuy).join('') || '<p class="text-muted" style="font-size:.8rem;">매수 없음</p>';
+
+  const convictionBadge = (item.conviction != null)
+    ? `<span class="strategy-badge" style="background:rgba(59,130,246,.12);color:#60a5fa;border:1px solid rgba(59,130,246,.3);">LSY 강경도 ${item.conviction}/10</span>`
+    : '';
 
   document.getElementById('strategy-modal-body').innerHTML = `
     <div class="strategy-modal-section">
-      <h4>전략 요약</h4>
+      <h4>전략 요약 ${convictionBadge}</h4>
       <div class="md-content" style="font-size:.85rem;">${mdRender(item.summary || '요약 없음')}</div>
     </div>
 
@@ -1191,6 +1443,15 @@ async function openIngestDetail(videoId) {
       ? `<span style="font-size:.75rem;color:var(--text-muted);margin-left:8px;">(청크 ${d.n_chunks}개 임베딩됨)</span>`
       : '';
 
+    const retryBtnHtml = d.status === 'failed'
+      ? `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
+          <button class="btn btn-primary btn-sm" data-retry-vid="${escHtml(d.video_id)}">↻ 이 영상만 재시도</button>
+          <p style="font-size:.72rem;color:var(--text-muted);margin-top:6px;">
+            로컬 수집기에 재시도 신호를 보냅니다. 로컬 수집기가 연결되어 있어야 합니다.
+          </p>
+        </div>`
+      : '';
+
     body.innerHTML = `
       <div style="margin-bottom:16px;">
         <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">제목</p>
@@ -1209,7 +1470,27 @@ async function openIngestDetail(videoId) {
       <div style="margin-bottom:16px;">
         <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">영상</p>
         <a href="${escHtml(url)}" target="_blank" style="color:var(--primary);font-size:.85rem;word-break:break-all;">${escHtml(url)}</a>
-      </div>`;
+      </div>
+      ${retryBtnHtml}`;
+
+    const retryBtn = body.querySelector('[data-retry-vid]');
+    if (retryBtn) {
+      retryBtn.addEventListener('click', async () => {
+        if (!confirm('이 영상만 재시도합니다. 계속하시겠습니까?')) return;
+        retryBtn.disabled = true;
+        retryBtn.textContent = '요청 중...';
+        try {
+          const r = await API.post(`/api/pipeline/retry/${encodeURIComponent(retryBtn.dataset.retryVid)}`, {});
+          alert(r.message || '재시도 요청 전송됨');
+          closeModal('ingest-detail-modal');
+          loadIngestionHistory(_ingestPage);
+        } catch (e) {
+          alert(e.message || '재시도 실패');
+          retryBtn.disabled = false;
+          retryBtn.textContent = '↻ 이 영상만 재시도';
+        }
+      });
+    }
   } catch (e) {
     body.innerHTML = `<p class="text-warn">${escHtml(e.message)}</p>`;
   }
