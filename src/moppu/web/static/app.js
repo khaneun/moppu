@@ -578,7 +578,7 @@ async function loadPipeline() {
     // 영상 서브카드
     document.getElementById('sc-videos').textContent = `${data.videos.total}건`;
 
-    // 임베딩 서브카드 (삭제 카운트 포함)
+    // 임베딩 서브카드
     const total = data.videos.total || 0;
     const embedded = data.videos.embedded || 0;
     const failed = data.videos.failed || 0;
@@ -589,6 +589,25 @@ async function loadPipeline() {
       <div class="embed-bar-wrap">
         <div class="embed-bar"><div class="embed-fill ${failed > 0 ? 'has-failed' : ''}" style="width:${pct}%"></div></div>
         <div class="embed-meta">${pct}% 완료${failed > 0 ? ` · 실패 ${failed}건` : ''}${delEmb > 0 ? ` · 삭제됨 ${delEmb}건` : ''}</div>
+      </div>`;
+
+    // 요약 반영 서브카드
+    const sum = data.summary || {};
+    const sDone = sum.done || 0;
+    const sMissing = sum.missing || 0;
+    const sEmbFailed = sum.embed_failed || 0;
+    const sTotal = sDone + sMissing + sEmbFailed;
+    const sPct = sTotal > 0 ? Math.round(sDone / sTotal * 100) : 0;
+    const summaryMeta = [
+      sDone > 0 ? `<span style="color:var(--success)">완료 ${sDone}</span>` : '',
+      sMissing > 0 ? `<span style="color:var(--warn)">요약미반영 ${sMissing}</span>` : '',
+      sEmbFailed > 0 ? `<span style="color:var(--danger)">임베딩실패 ${sEmbFailed}</span>` : '',
+    ].filter(Boolean).join(' · ');
+    document.getElementById('sc-summary').innerHTML = `
+      <div class="sub-card-stat">${sDone}<span style="font-size:.75rem;color:var(--text-muted);font-weight:400;"> / ${sTotal}</span></div>
+      <div class="embed-bar-wrap">
+        <div class="embed-bar"><div class="embed-fill ${(sMissing > 0 || sEmbFailed > 0) ? 'has-failed' : ''}" style="width:${sPct}%"></div></div>
+        <div class="embed-meta" style="font-size:.72rem;">${summaryMeta || '–'}</div>
       </div>`;
   } catch (e) { if (e.message !== '인증 필요') console.error('loadPipeline', e); }
 }
@@ -623,11 +642,14 @@ async function loadIngestionHistory(page) {
     tbody.innerHTML = data.items.map(v => {
       const dt = v.created_at ? formatDateTimeTwoLine(v.created_at) : '-';
       const title = trunc(v.title || v.video_id, 48);
-      const badge = v.status === 'embedded'
+      const ps = v.pipeline_status || v.status;
+      const badge = ps === 'done'
         ? '<span class="ingest-badge ingest-badge-embedded">완료</span>'
-        : v.status === 'failed'
-          ? '<span class="ingest-badge ingest-badge-failed">실패</span>'
-          : '<span class="ingest-badge ingest-badge-pending">대기</span>';
+        : ps === 'summary_missing'
+          ? '<span class="ingest-badge ingest-badge-summary-missing">요약미반영</span>'
+          : ps === 'embed_failed'
+            ? '<span class="ingest-badge ingest-badge-failed">임베딩실패</span>'
+            : '<span class="ingest-badge ingest-badge-pending">대기</span>';
       return `<tr class="clickable-row" data-vid="${escHtml(v.video_id)}">
         <td style="font-size:.76rem;width:140px;">${dt}</td>
         <td style="font-size:.82rem;">${escHtml(title)}</td>
@@ -1433,24 +1455,32 @@ async function openIngestDetail(videoId) {
         ? escHtml(d.source_type.replace('list:', '목록: '))
         : '채널';
 
-    const statusHtml = d.status === 'embedded'
-      ? '<span class="ingest-badge ingest-badge-embedded">임베딩 완료</span>'
-      : d.status === 'failed'
-        ? `<span class="ingest-badge ingest-badge-failed">실패</span>${d.error ? `<p class="text-warn" style="font-size:.78rem;margin-top:6px;">${escHtml(d.error)}</p>` : ''}`
-        : '<span class="ingest-badge ingest-badge-pending">대기</span>';
+    // pipeline_status: done / summary_missing / embed_failed / pending
+    const ps = d.pipeline_status || (d.status === 'embedded' ? 'done' : d.status === 'failed' ? 'embed_failed' : 'pending');
+    const statusHtml = ps === 'done'
+      ? '<span class="ingest-badge ingest-badge-embedded">완료</span>'
+      : ps === 'summary_missing'
+        ? '<span class="ingest-badge ingest-badge-summary-missing">요약 미반영</span>'
+        : ps === 'embed_failed'
+          ? `<span class="ingest-badge ingest-badge-failed">임베딩 실패</span>${d.error ? `<p class="text-warn" style="font-size:.78rem;margin-top:6px;">${escHtml(d.error)}</p>` : ''}`
+          : '<span class="ingest-badge ingest-badge-pending">대기</span>';
 
     const chunksInfo = d.n_chunks > 0
       ? `<span style="font-size:.75rem;color:var(--text-muted);margin-left:8px;">(청크 ${d.n_chunks}개 임베딩됨)</span>`
       : '';
 
-    const retryBtnHtml = d.status === 'failed'
+    // 임베딩 실패 → 로컬 수집기 재시도 / 요약 미반영 → 서버 측 요약만 재처리
+    const retryBtnHtml = ps === 'embed_failed'
       ? `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
-          <button class="btn btn-primary btn-sm" data-retry-vid="${escHtml(d.video_id)}">↻ 이 영상만 재시도</button>
-          <p style="font-size:.72rem;color:var(--text-muted);margin-top:6px;">
-            로컬 수집기에 재시도 신호를 보냅니다. 로컬 수집기가 연결되어 있어야 합니다.
-          </p>
+          <button class="btn btn-primary btn-sm" data-retry-vid="${escHtml(d.video_id)}" data-retry-type="embed">↻ 임베딩 재시도</button>
+          <p style="font-size:.72rem;color:var(--text-muted);margin-top:6px;">로컬 수집기에 재시도 신호를 보냅니다.</p>
         </div>`
-      : '';
+      : ps === 'summary_missing'
+        ? `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
+            <button class="btn btn-secondary btn-sm" data-retry-vid="${escHtml(d.video_id)}" data-retry-type="summary">↻ 요약·페르소나 재처리</button>
+            <p style="font-size:.72rem;color:var(--text-muted);margin-top:6px;">임베딩은 유지하고 요약 재생성 + LSY 페르소나 업데이트만 수행합니다.</p>
+          </div>`
+        : '';
 
     body.innerHTML = `
       <div style="margin-bottom:16px;">
@@ -1476,18 +1506,24 @@ async function openIngestDetail(videoId) {
     const retryBtn = body.querySelector('[data-retry-vid]');
     if (retryBtn) {
       retryBtn.addEventListener('click', async () => {
-        if (!confirm('이 영상만 재시도합니다. 계속하시겠습니까?')) return;
+        const type = retryBtn.dataset.retryType;
+        const label = type === 'summary' ? '요약·페르소나 재처리' : '임베딩 재시도';
+        if (!confirm(`${label}합니다. 계속하시겠습니까?`)) return;
         retryBtn.disabled = true;
-        retryBtn.textContent = '요청 중...';
+        retryBtn.textContent = '처리 중...';
         try {
-          const r = await API.post(`/api/pipeline/retry/${encodeURIComponent(retryBtn.dataset.retryVid)}`, {});
-          alert(r.message || '재시도 요청 전송됨');
+          const endpoint = type === 'summary'
+            ? `/api/pipeline/retry-summary/${encodeURIComponent(retryBtn.dataset.retryVid)}`
+            : `/api/pipeline/retry/${encodeURIComponent(retryBtn.dataset.retryVid)}`;
+          const r = await API.post(endpoint, {});
+          alert(r.message || '요청 전송됨');
           closeModal('ingest-detail-modal');
           loadIngestionHistory(_ingestPage);
+          loadPipeline();
         } catch (e) {
-          alert(e.message || '재시도 실패');
+          alert(e.message || '요청 실패');
           retryBtn.disabled = false;
-          retryBtn.textContent = '↻ 이 영상만 재시도';
+          retryBtn.textContent = `↻ ${label}`;
         }
       });
     }

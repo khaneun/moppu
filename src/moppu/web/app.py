@@ -46,6 +46,32 @@ _token_log_path: Path | None = None
 _sessions: set[str] = set()
 _pipeline_running: bool = False
 _pipeline_run_msg: str = ""
+
+
+def _get_summary_reflected_ids(data_dir: Path) -> set[str]:
+    """모든 daily_summary 파일에서 요약에 반영된 video_id 집합 반환."""
+    ids: set[str] = set()
+    for p in data_dir.glob("daily_summary_*.json"):
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+            for v in d.get("videos", []):
+                if vid := v.get("video_id"):
+                    ids.add(vid)
+        except Exception:
+            pass
+    return ids
+
+
+def _derive_pipeline_status(video_status: str, video_id: str, reflected_ids: set[str]) -> str:
+    """video DB 상태 + 요약 반영 여부 → 파이프라인 단계 상태 반환.
+
+    반환값: "done" | "summary_missing" | "embed_failed" | "pending"
+    """
+    if video_status == "failed":
+        return "embed_failed"
+    if video_status == "embedded":
+        return "done" if video_id in reflected_ids else "summary_missing"
+    return "pending"
 _deleted_embedding_count: int = 0
 _local_run_requested: bool = False   # 로컬 수집기 실행 요청 플래그
 _local_retry_video_ids: list[str] = []  # 로컬 수집기에 재시도 요청할 video_id 큐
@@ -356,6 +382,12 @@ def pipeline_status():
 
         vl_total = s.query(func.count(VideoListEntry.id)).scalar() or 0
 
+        # 요약 반영 현황
+        reflected_ids = _get_summary_reflected_ids(_rt.cfg.app.data_dir)
+        embedded_ids = [r[0] for r in s.query(Video.video_id).filter(Video.status == "embedded").all()]
+        summary_done = sum(1 for vid in embedded_ids if vid in reflected_ids)
+        summary_missing = vid_embedded - summary_done
+
         recent = (
             s.query(Video)
             .order_by(desc(Video.created_at))
@@ -367,6 +399,7 @@ def pipeline_status():
                 "video_id": v.video_id,
                 "title": v.title,
                 "status": v.status,
+                "pipeline_status": _derive_pipeline_status(v.status, v.video_id, reflected_ids),
                 "created_at": v.created_at.isoformat() if v.created_at else None,
                 "url": v.url,
                 "error": v.error,
@@ -381,6 +414,11 @@ def pipeline_status():
             "embedded": vid_embedded,
             "pending": vid_pending,
             "failed": vid_failed,
+        },
+        "summary": {
+            "done": summary_done,
+            "missing": summary_missing,
+            "embed_failed": vid_failed,
         },
         "video_list_entries": vl_total,
         "recent_ingestions": recent_list,
@@ -995,6 +1033,7 @@ def delete_video_entry(list_name: str, video_id: str):
 @app.get("/api/pipeline/ingestion-history")
 def ingestion_history(page: int = 1, per_page: int = 10):
     assert _rt is not None
+    reflected_ids = _get_summary_reflected_ids(_rt.cfg.app.data_dir)
     with _rt.session_factory() as s:
         total = s.query(func.count(Video.id)).scalar() or 0
         videos = (
@@ -1014,6 +1053,7 @@ def ingestion_history(page: int = 1, per_page: int = 10):
                 "video_id": v.video_id,
                 "title": v.title,
                 "status": v.status,
+                "pipeline_status": _derive_pipeline_status(v.status, v.video_id, reflected_ids),
                 "source_type": v.source_type,
                 "channel_name": ch_name,
                 "created_at": v.created_at.isoformat() if v.created_at else None,
@@ -1731,6 +1771,43 @@ def retry_failed_video(video_id: str):
         _local_retry_video_ids.append(video_id)
     _write_pipeline_log(f"[RETRY] {video_id} — 로컬 수집기에 재시도 요청")
     return {"ok": True, "message": f"{video_id} 재시도 요청됨"}
+
+
+@app.post("/api/pipeline/retry-summary/{video_id}")
+def retry_summary_only(video_id: str):
+    """임베딩은 완료됐지만 요약·페르소나 미반영된 영상 재처리.
+
+    임베딩을 다시 하지 않고 요약 재생성 + 페르소나 업데이트만 수행.
+    """
+    assert _rt is not None
+    with _rt.session_factory() as s:
+        v = s.query(Video).filter_by(video_id=video_id).one_or_none()
+        if not v:
+            raise HTTPException(404, "Video not found")
+        if v.status != "embedded":
+            raise HTTPException(400, f"임베딩 완료 상태가 아닙니다 (현재: {v.status})")
+        kst_date = None
+        if v.created_at:
+            from datetime import timedelta as _td
+            kst_date = (v.created_at + _td(hours=9)).strftime("%Y-%m-%d")
+
+    def _do() -> None:
+        from moppu.agent.daily_summary import generate_and_save
+        from moppu.agent.persona import update_with_new
+        try:
+            _write_pipeline_log(f"[RETRY-SUMMARY] {video_id} — 요약 재생성 중...")
+            generate_and_save(
+                _rt.session_factory, _rt.llm, _rt.cfg.app.data_dir,
+                force=True, update_persona=False, date_str=kst_date,
+            )
+            update_with_new(_rt.session_factory, _rt.llm, _rt.cfg.app.data_dir, [video_id])
+            _write_pipeline_log(f"[RETRY-SUMMARY] {video_id} — 완료")
+        except Exception as e:
+            _write_pipeline_log(f"[RETRY-SUMMARY][ERROR] {video_id}: {e}")
+            log.error("retry_summary.failed", video_id=video_id, err=str(e))
+
+    threading.Thread(target=_do, daemon=True).start()
+    return {"ok": True, "message": f"{video_id} 요약·페르소나 재처리 시작됨"}
 
 
 @app.post("/api/collect/process")

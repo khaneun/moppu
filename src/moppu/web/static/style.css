@@ -1296,6 +1296,12 @@ input:checked + .slider::before { transform: translateX(20px); background: #fff;
   border: 1px solid rgba(245,158,11,.2);
 }
 
+.ingest-badge-summary-missing {
+  background: rgba(139,92,246,.13);
+  color: #c4b5fd;
+  border: 1px solid rgba(139,92,246,.25);
+}
+
 .ingest-badge-failed {
   background: rgba(239,68,68,.13);
   color: #fca5a5;
