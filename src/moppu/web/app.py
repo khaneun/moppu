@@ -1575,27 +1575,40 @@ def collect_done(req: CollectDoneRequest):
             lines.append(f"_외 {len(req.videos) - 10}건_")
         _send_telegram("\n".join(lines))
 
-        # 처리된 video_id 기준으로 요약 재생성 + 페르소나 점진 업데이트
+        # 처리된 video_id 기준으로 날짜별 요약 재생성 + 페르소나 점진 업데이트
         # created_at 날짜와 무관하게 실제 처리된 영상 반영 (재시도 포함)
         processed_ids = [v["video_id"] for v in req.videos if v.get("video_id")]
 
         def _do_update(video_ids: list[str]) -> None:
             from moppu.agent.daily_summary import generate_and_save
             from moppu.agent.persona import update_with_new
-            try:
-                _write_pipeline_log("[LOCAL] 수집 요약 재생성 중...")
-                result = generate_and_save(
-                    _rt.session_factory, _rt.llm, _rt.cfg.app.data_dir,
-                    force=True, update_persona=False,  # 페르소나는 아래에서 별도 처리
-                )
-                if result:
-                    usage = result.get("usage") or {}
-                    if usage.get("input_tokens"):
-                        _log_token_usage(_rt.cfg.llm.provider, _rt.cfg.llm.model, usage)
-                _write_pipeline_log("[LOCAL] 수집 요약 재생성 완료")
-            except Exception as e:
-                _write_pipeline_log(f"[LOCAL][ERROR] 요약 재생성 실패: {e}")
-                log.error("collect.summary_failed", err=str(e))
+            from moppu.storage.db import Video as _Video
+
+            # 처리된 영상의 created_at 날짜 목록 수집 (날짜별 요약 재생성 대상)
+            dates_to_regen: set[str] = set()
+            with _rt.session_factory() as s:
+                for vid in video_ids:
+                    v = s.query(_Video).filter_by(video_id=vid).one_or_none()
+                    if v and v.created_at:
+                        # created_at은 UTC → KST 변환
+                        kst_date = (v.created_at + timedelta(hours=9)).strftime("%Y-%m-%d")
+                        dates_to_regen.add(kst_date)
+
+            for ds in sorted(dates_to_regen):
+                try:
+                    _write_pipeline_log(f"[LOCAL] {ds} 수집 요약 재생성 중...")
+                    result = generate_and_save(
+                        _rt.session_factory, _rt.llm, _rt.cfg.app.data_dir,
+                        force=True, update_persona=False, date_str=ds,
+                    )
+                    if result:
+                        usage = result.get("usage") or {}
+                        if usage.get("input_tokens"):
+                            _log_token_usage(_rt.cfg.llm.provider, _rt.cfg.llm.model, usage)
+                    _write_pipeline_log(f"[LOCAL] {ds} 수집 요약 재생성 완료")
+                except Exception as e:
+                    _write_pipeline_log(f"[LOCAL][ERROR] {ds} 요약 재생성 실패: {e}")
+                    log.error("collect.summary_failed", date=ds, err=str(e))
 
             try:
                 _write_pipeline_log(f"[LOCAL] LSY 페르소나 업데이트 중 ({len(video_ids)}건)...")

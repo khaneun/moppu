@@ -45,12 +45,13 @@ def generate_and_save(
     *,
     force: bool = False,
     update_persona: bool = True,
+    date_str: str | None = None,
 ) -> dict[str, Any] | None:
-    """Generate LLM summary of today's ingested videos and write to disk.
+    """Generate LLM summary of ingested videos for a given date and write to disk.
 
-    - Returns the result dict on success, or None when nothing was ingested today.
-    - Skips generation (returns cached) if today's file already exists, unless
-      ``force=True``.
+    - ``date_str``: 대상 날짜 (KST, "YYYY-MM-DD"). None이면 오늘.
+    - Returns the result dict on success, or None when nothing was ingested.
+    - Skips generation (returns cached) if the file already exists, unless ``force=True``.
     """
     from sqlalchemy import desc
     from sqlalchemy.orm import Session
@@ -58,27 +59,32 @@ def generate_and_save(
     from moppu.llm.base import ChatMessage
     from moppu.storage.db import Transcript, Video
 
-    today_str = datetime.now(KST).strftime("%Y-%m-%d")
-    save_path = _path(data_dir, today_str)
+    target_str = date_str or datetime.now(KST).strftime("%Y-%m-%d")
+    save_path = _path(data_dir, target_str)
 
     if save_path.exists() and not force:
-        log.info("daily_summary.cached", date=today_str)
+        log.info("daily_summary.cached", date=target_str)
         return json.loads(save_path.read_text(encoding="utf-8"))
 
-    midnight_kst = datetime.now(KST).replace(hour=0, minute=0, second=0, microsecond=0)
-    midnight_utc = midnight_kst.astimezone(timezone.utc).replace(tzinfo=None)
+    target_date = datetime.strptime(target_str, "%Y-%m-%d").replace(tzinfo=KST)
+    midnight_utc = target_date.astimezone(timezone.utc).replace(tzinfo=None)
+    next_midnight_utc = (target_date + timedelta(days=1)).astimezone(timezone.utc).replace(tzinfo=None)
 
     with session_factory() as s:  # type: Session
         transcripts = (
             s.query(Transcript)
             .join(Video, Video.id == Transcript.video_fk)
-            .filter(Video.created_at >= midnight_utc, Video.status == "embedded")
+            .filter(
+                Video.created_at >= midnight_utc,
+                Video.created_at < next_midnight_utc,
+                Video.status == "embedded",
+            )
             .order_by(desc(Video.created_at))
             .limit(5)
             .all()
         )
         if not transcripts:
-            log.info("daily_summary.no_videos", date=today_str)
+            log.info("daily_summary.no_videos", date=target_str)
             return None
 
         video_infos: list[dict[str, Any]] = []
@@ -128,7 +134,7 @@ def generate_and_save(
     }
 
     result: dict[str, Any] = {
-        "date": today_str,
+        "date": target_str,
         "summary": resp.text,
         "videos": video_infos,
         "questions": questions,
@@ -137,7 +143,7 @@ def generate_and_save(
     }
     data_dir.mkdir(parents=True, exist_ok=True)
     save_path.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-    log.info("daily_summary.saved", date=today_str, path=str(save_path))
+    log.info("daily_summary.saved", date=target_str, path=str(save_path))
 
     # 페르소나 점진적 업데이트 (오늘 수집 영상 기반 — collect/done 경로와 중복 방지)
     if update_persona:
