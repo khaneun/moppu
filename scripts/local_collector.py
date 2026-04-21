@@ -133,9 +133,10 @@ class EC2Client:
         except Exception as e:
             log.warning(f"시작 알림 전송 실패: {e}")
 
-    def poll_run_request(self) -> bool:
-        """대시보드에서 실행 요청이 왔는지 확인 (감시 모드용).
+    def poll_run_request(self) -> tuple[bool, list[str]]:
+        """대시보드에서 실행 요청·재시도 큐 확인 (감시 모드용).
 
+        반환: (run_requested, retry_video_ids)
         401 수신 시 자동 재로그인 — EC2 재시작으로 토큰이 초기화된 경우 복구.
         """
         try:
@@ -144,10 +145,13 @@ class EC2Client:
                 log.info("세션 만료 — 재로그인 시도...")
                 self.login()
                 resp = self._session.get(f"{self.base_url}/api/collect/poll", timeout=5)
-            return resp.ok and resp.json().get("requested", False)
+            if not resp.ok:
+                return False, []
+            data = resp.json()
+            return data.get("requested", False), data.get("retry_video_ids", [])
         except Exception as e:
             log.debug(f"폴링 오류 (무시): {e}")
-            return False
+            return False, []
 
 
 # ------------------------------------------------------------------ #
@@ -521,8 +525,13 @@ def watch_mode(client: EC2Client, cfg: dict[str, Any], poll_interval: int = 60) 
                 log.info(f"[대기 중] 다음 자정 실행: {next_midnight_run.strftime('%H:%M')} KST")
 
             # 대시보드 트리거 확인
-            if client.poll_run_request():
+            run_requested, retry_ids = client.poll_run_request()
+            if run_requested:
                 log.info("▶ 대시보드 실행 요청 수신 — 즉시 실행")
+                run_collect(client, cfg)
+                next_midnight_run = _next_midnight_kst()
+            elif retry_ids:
+                log.info(f"▶ 재시도 요청 수신 ({len(retry_ids)}건) — 즉시 실행")
                 run_collect(client, cfg)
                 next_midnight_run = _next_midnight_kst()
 
