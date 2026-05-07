@@ -3,7 +3,7 @@
 # git push 후 EC2에서 실행하거나 로컬에서 SSH로 호출
 set -euo pipefail
 
-APP_DIR="/opt/moppu"
+APP_DIR="/home/ec2-user/moppu"
 cd "$APP_DIR"
 
 echo "=== [1/4] git pull ==="
@@ -11,10 +11,12 @@ git pull origin main
 
 echo "=== [2/4] 패키지 업데이트 ==="
 export PATH="$HOME/.local/bin:$PATH"
-uv pip install -e ".[dev]" -q
+uv pip install --python "$APP_DIR/.venv/bin/python" -e ".[dev]" -q
+uv pip install --python "$APP_DIR/.venv/bin/python" boto3 -q
 
 echo "=== [3/4] Secrets Manager에서 .env 갱신 ==="
-python3 scripts/secrets.py --secret moppu/prod --region ap-northeast-2
+[ -f .env ] && cp .env ".env.bak.$(date +%Y%m%d-%H%M%S)"
+"$APP_DIR/.venv/bin/python" scripts/secrets.py --secret moppu --region ap-northeast-2
 
 echo "=== [4/4] 서비스 재시작 ==="
 sudo systemctl restart moppu-dashboard moppu-scheduler moppu-bot

@@ -5,8 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=ec2-user
-WorkingDirectory=/opt/moppu
-ExecStart=/opt/moppu/.venv/bin/moppu scheduler
+WorkingDirectory=/home/ec2-user/moppu
+ExecStart=/home/ec2-user/moppu/.venv/bin/moppu scheduler
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal

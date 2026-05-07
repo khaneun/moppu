@@ -110,7 +110,7 @@ python local_collector.py --setup   # 설정 마법사 + Task Scheduler 등록
 
 ```bash
 # EC2
-ssh -i ~/kitty-key.pem ec2-user@<IP> "cd /opt/moppu && bash scripts/deploy.sh"
+ssh -i ~/kitty-key.pem ec2-user@<IP> "cd /home/ec2-user/moppu && bash scripts/deploy.sh"
 
 # 로컬 PC
 cd moppu\scripts && git pull

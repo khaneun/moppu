@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPO_URL="https://github.com/khaneun/moppu.git"   # ← 실제 repo URL로 변경
-APP_DIR="/opt/moppu"
+APP_DIR="/home/ec2-user/moppu"
 APP_USER="ec2-user"   # Ubuntu면 "ubuntu" 로 변경
 
 echo "=== [1/6] 시스템 패키지 업데이트 ==="
@@ -19,8 +19,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 
 echo "=== [4/6] 코드 클론 ==="
-sudo mkdir -p "$APP_DIR"
-sudo chown "$APP_USER:$APP_USER" "$APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
     cd "$APP_DIR" && git pull
 else
@@ -34,7 +32,7 @@ uv pip install -e ".[dev]"
 uv pip install boto3   # Secrets Manager 접근용
 
 echo "=== [6/6] Secrets Manager에서 .env 생성 ==="
-python3 scripts/secrets.py --secret moppu/prod --region ap-northeast-2
+"$APP_DIR/.venv/bin/python" scripts/secrets.py --secret moppu --region ap-northeast-2
 
 echo "=== 설정 파일 초기화 ==="
 [ -f config/config.yaml ] || cp config/config.example.yaml config/config.yaml
