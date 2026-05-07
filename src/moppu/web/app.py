@@ -1595,15 +1595,36 @@ class CollectDoneRequest(BaseModel):
     total: int = 0
     message: str = "완료"
     videos: list[dict[str, Any]] = []   # [{video_id, title, url}]
+    failed_video_ids: list[str] = []    # 자막 수집 자체가 불가했던 영상 (재시도 무한 루프 방지용)
 
 
 @app.post("/api/collect/done")
 def collect_done(req: CollectDoneRequest):
     """로컬 수집기가 작업 완료 후 호출 — 상태 업데이트 + 요약/페르소나 갱신 + Telegram 알림."""
     assert _rt is not None
-    global _pipeline_run_msg
+    global _pipeline_run_msg, _local_retry_video_ids
     _pipeline_run_msg = req.message
     _write_pipeline_log(f"[LOCAL 완료] {req.message}")
+
+    # 자막을 받을 수 없는 영상은 failed로 마킹 — DB pending 잔류로 인한
+    # 자정 자동 실행의 무한 재시도 방지. 수동 retry 큐에서도 제거.
+    if req.failed_video_ids:
+        from moppu.storage.db import Video as _Video
+        with _rt.session_factory() as s:
+            for vid in req.failed_video_ids:
+                v = s.query(_Video).filter_by(video_id=vid).one_or_none()
+                if v and v.status not in {"embedded", "transcribed"}:
+                    v.status = "failed"
+                    if not v.error:
+                        v.error = "자막 수집 불가 (로컬)"
+            s.commit()
+        _local_retry_video_ids = [
+            vid for vid in _local_retry_video_ids if vid not in req.failed_video_ids
+        ]
+        _write_pipeline_log(
+            f"[LOCAL] {len(req.failed_video_ids)}건 failed 마킹: {','.join(req.failed_video_ids[:5])}"
+            + (f" 외 {len(req.failed_video_ids) - 5}건" if len(req.failed_video_ids) > 5 else "")
+        )
 
     if req.videos:
         lines = [f"📥 *수집 완료 ({req.success}/{req.total}건)*"]

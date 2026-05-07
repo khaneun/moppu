@@ -107,8 +107,13 @@ class EC2Client:
         success: int,
         total: int,
         videos: list[dict] | None = None,
+        failed_video_ids: list[str] | None = None,
     ) -> None:
-        """수집 완료 결과를 EC2에 알립니다."""
+        """수집 완료 결과를 EC2에 알립니다.
+
+        ``failed_video_ids`` — 자막을 받을 수 없어 EC2에 전송조차 못한 영상.
+        EC2는 이들을 ``failed`` 상태로 마킹해 retry 무한 루프를 방지한다.
+        """
         if total == 0:
             msg = "수집할 항목 없음"
         elif success == 0:
@@ -118,7 +123,13 @@ class EC2Client:
         try:
             self._session.post(
                 f"{self.base_url}/api/collect/done",
-                json={"success": success, "total": total, "message": msg, "videos": videos or []},
+                json={
+                    "success": success,
+                    "total": total,
+                    "message": msg,
+                    "videos": videos or [],
+                    "failed_video_ids": failed_video_ids or [],
+                },
                 timeout=10,
             )
             log.info(f"EC2 완료 신호 전송: {msg}")
@@ -159,43 +170,52 @@ class EC2Client:
 # ------------------------------------------------------------------ #
 
 def fetch_transcript(video_id: str, preferred_langs: list[str]) -> dict[str, Any] | None:
+    """자막 수집. youtube-transcript-api 단계의 어떤 예외도
+    yt-dlp fallback으로 회복하고, fallback도 실패하면 None 반환.
+    호출자(run_collect)가 단일 영상 실패로 멈추면 안 되므로 절대 예외를 흘리지 않는다.
+    """
     from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
 
-    api = YouTubeTranscriptApi()
     try:
-        transcript_list = api.list(video_id)
-    except TranscriptsDisabled:
-        log.info(f"  자막 비활성화: {video_id}")
-        return None
-    except Exception as e:
-        log.warning(f"  자막 목록 실패 [{video_id}]: {e} — yt-dlp 시도")
-        return _fetch_via_ytdlp(video_id, preferred_langs)
-
-    transcript = None
-    for lang in preferred_langs:
+        api = YouTubeTranscriptApi()
         try:
-            transcript = transcript_list.find_manually_created_transcript([lang])
-            break
-        except NoTranscriptFound:
-            continue
-    if transcript is None:
+            transcript_list = api.list(video_id)
+        except TranscriptsDisabled:
+            log.info(f"  자막 비활성화: {video_id}")
+            return None
+
+        transcript = None
         for lang in preferred_langs:
             try:
-                transcript = transcript_list.find_generated_transcript([lang])
+                transcript = transcript_list.find_manually_created_transcript([lang])
                 break
             except NoTranscriptFound:
                 continue
-    if transcript is None:
-        try:
-            transcript = next(iter(transcript_list))
-            if preferred_langs and transcript.is_translatable:
-                transcript = transcript.translate(preferred_langs[0])
-        except StopIteration:
-            return None
+        if transcript is None:
+            for lang in preferred_langs:
+                try:
+                    transcript = transcript_list.find_generated_transcript([lang])
+                    break
+                except NoTranscriptFound:
+                    continue
+        if transcript is None:
+            try:
+                transcript = next(iter(transcript_list))
+                if preferred_langs and transcript.is_translatable:
+                    transcript = transcript.translate(preferred_langs[0])
+            except StopIteration:
+                return None
 
-    entries = transcript.fetch()
-    text = " ".join(e.text.replace("\n", " ").strip() for e in entries if e.text)
-    return {"language": transcript.language_code, "text": text}
+        entries = transcript.fetch()
+        text = " ".join(e.text.replace("\n", " ").strip() for e in entries if e.text)
+        return {"language": transcript.language_code, "text": text}
+    except Exception as e:
+        log.warning(f"  자막 API 실패 [{video_id}]: {str(e)[:200]} — yt-dlp 시도")
+        try:
+            return _fetch_via_ytdlp(video_id, preferred_langs)
+        except Exception as e2:
+            log.warning(f"  yt-dlp 실패 [{video_id}]: {str(e2)[:200]}")
+            return None
 
 
 def _fetch_via_ytdlp(video_id: str, preferred_langs: list[str]) -> dict[str, Any] | None:
@@ -461,6 +481,7 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
     log.info(f"수집 대상: {len(tasks)}건")
     success = 0
     ingested_videos: list[dict[str, Any]] = []
+    failed_video_ids: list[str] = []
 
     for task in tasks:
         video_id = task["video_id"]
@@ -478,6 +499,7 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
         tr = fetch_transcript(video_id, preferred_langs)
         if tr is None:
             log.warning(f"  자막 없음, 스킵: {video_id}")
+            failed_video_ids.append(video_id)
             continue
 
         # EC2로 전송 (EC2에서 임베딩)
@@ -499,10 +521,10 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
                 "url":      task.get("url") or f"https://www.youtube.com/watch?v={video_id}",
             })
 
-    log.info(f"완료: {success}/{len(tasks)}건 전송")
+    log.info(f"완료: {success}/{len(tasks)}건 전송, 자막 실패 {len(failed_video_ids)}건")
     if success > 0:
         client.trigger_process()
-    client.notify_done(success, len(tasks), ingested_videos)
+    client.notify_done(success, len(tasks), ingested_videos, failed_video_ids)
 
 
 # ------------------------------------------------------------------ #
@@ -528,19 +550,27 @@ def watch_mode(client: EC2Client, cfg: dict[str, Any], poll_interval: int = 60) 
             run_requested, retry_ids = client.poll_run_request()
             if run_requested:
                 log.info("▶ 대시보드 실행 요청 수신 — 즉시 실행")
-                run_collect(client, cfg)
-                next_midnight_run = _next_midnight_kst()
+                try:
+                    run_collect(client, cfg)
+                finally:
+                    next_midnight_run = _next_midnight_kst()
             elif retry_ids:
                 log.info(f"▶ 재시도 요청 수신 ({len(retry_ids)}건) — 즉시 실행")
-                run_collect(client, cfg)
-                next_midnight_run = _next_midnight_kst()
+                try:
+                    run_collect(client, cfg)
+                finally:
+                    next_midnight_run = _next_midnight_kst()
 
             # 자정 자동 실행
             now = datetime.now(KST)
             if now >= next_midnight_run:
                 log.info("▶ 자정 자동 실행")
-                run_collect(client, cfg)
-                next_midnight_run = _next_midnight_kst()
+                # run_collect 예외와 무관하게 다음 자정 시각으로 전진해야
+                # 매 tick마다 같은 트리거가 무한 반복되지 않는다.
+                try:
+                    run_collect(client, cfg)
+                finally:
+                    next_midnight_run = _next_midnight_kst()
 
         except Exception as e:
             log.warning(f"감시 루프 오류: {e}")
