@@ -169,15 +169,40 @@ class EC2Client:
 # YouTube 자막 수집 (로컬 — IP 차단 없음)
 # ------------------------------------------------------------------ #
 
-def fetch_transcript(video_id: str, preferred_langs: list[str]) -> dict[str, Any] | None:
+def _build_yta_client(cookies_file: str | None):
+    """쿠키 파일이 있으면 인증된 requests.Session으로 YouTubeTranscriptApi 생성.
+    인증된 요청은 차단 회피력이 훨씬 높다.
+    """
+    from youtube_transcript_api import YouTubeTranscriptApi
+
+    if cookies_file and Path(cookies_file).exists():
+        try:
+            import requests
+            from http.cookiejar import MozillaCookieJar
+            jar = MozillaCookieJar()
+            jar.load(cookies_file, ignore_discard=True, ignore_expires=True)
+            session = requests.Session()
+            session.cookies = jar  # type: ignore[assignment]
+            log.info(f"  쿠키 적용 (transcript-api): {cookies_file}")
+            return YouTubeTranscriptApi(http_client=session)
+        except Exception as e:
+            log.warning(f"  쿠키 로드 실패: {e} — 익명 요청으로 fallback")
+    return YouTubeTranscriptApi()
+
+
+def fetch_transcript(
+    video_id: str,
+    preferred_langs: list[str],
+    cookies_file: str | None = None,
+) -> dict[str, Any] | None:
     """자막 수집. youtube-transcript-api 단계의 어떤 예외도
     yt-dlp fallback으로 회복하고, fallback도 실패하면 None 반환.
     호출자(run_collect)가 단일 영상 실패로 멈추면 안 되므로 절대 예외를 흘리지 않는다.
     """
-    from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled, YouTubeTranscriptApi
+    from youtube_transcript_api import NoTranscriptFound, TranscriptsDisabled
 
     try:
-        api = YouTubeTranscriptApi()
+        api = _build_yta_client(cookies_file)
         try:
             transcript_list = api.list(video_id)
         except TranscriptsDisabled:
@@ -212,13 +237,17 @@ def fetch_transcript(video_id: str, preferred_langs: list[str]) -> dict[str, Any
     except Exception as e:
         log.warning(f"  자막 API 실패 [{video_id}]: {str(e)[:200]} — yt-dlp 시도")
         try:
-            return _fetch_via_ytdlp(video_id, preferred_langs)
+            return _fetch_via_ytdlp(video_id, preferred_langs, cookies_file)
         except Exception as e2:
             log.warning(f"  yt-dlp 실패 [{video_id}]: {str(e2)[:200]}")
             return None
 
 
-def _fetch_via_ytdlp(video_id: str, preferred_langs: list[str]) -> dict[str, Any] | None:
+def _fetch_via_ytdlp(
+    video_id: str,
+    preferred_langs: list[str],
+    cookies_file: str | None = None,
+) -> dict[str, Any] | None:
     import re, tempfile
     import yt_dlp
 
@@ -231,6 +260,9 @@ def _fetch_via_ytdlp(video_id: str, preferred_langs: list[str]) -> dict[str, Any
             "outtmpl": str(Path(tmpdir) / "%(id)s.%(ext)s"),
             "ignoreerrors": True,
         }
+        if cookies_file and Path(cookies_file).exists():
+            opts["cookiefile"] = cookies_file
+            log.info(f"  쿠키 적용 (yt-dlp): {cookies_file}")
         with yt_dlp.YoutubeDL(opts) as ydl:
             ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
 
@@ -401,6 +433,10 @@ def _parse_iso_duration(s: str) -> int | None:
 def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
     preferred_langs: list[str] = cfg.get("preferred_languages", ["ko", "en"])
     youtube_api_key: str | None = cfg.get("youtube_api_key")
+    cookies_file: str | None = cfg.get("cookies_file") or None
+    if cookies_file and not Path(cookies_file).exists():
+        log.warning(f"쿠키 파일이 존재하지 않음: {cookies_file} — 익명 요청 사용")
+        cookies_file = None
 
     log.info("=" * 55)
     log.info("Moppu Local Collector — 수집 시작")
@@ -496,7 +532,7 @@ def run_collect(client: EC2Client, cfg: dict[str, Any]) -> None:
             task.update({k: v for k, v in meta.items() if v is not None})
 
         # 자막 수집
-        tr = fetch_transcript(video_id, preferred_langs)
+        tr = fetch_transcript(video_id, preferred_langs, cookies_file)
         if tr is None:
             log.warning(f"  자막 없음, 스킵: {video_id}")
             failed_video_ids.append(video_id)
@@ -675,6 +711,15 @@ def setup_wizard() -> None:
     cfg["youtube_api_key"]    = ask("YouTube Data API 키 (없으면 Enter)", cfg.get("youtube_api_key", ""))
     if not cfg["youtube_api_key"]:
         cfg.pop("youtube_api_key", None)
+
+    print("\n[쿠키 파일] 차단 회피용 — Chrome 확장 'Get cookies.txt LOCALLY' 등으로")
+    print("  https://www.youtube.com 의 쿠키를 Netscape 형식으로 export 후 경로 입력 (없으면 Enter)")
+    cfg["cookies_file"] = ask("쿠키 파일 경로", cfg.get("cookies_file", ""))
+    if not cfg["cookies_file"]:
+        cfg.pop("cookies_file", None)
+    elif not Path(cfg["cookies_file"]).exists():
+        print(f"  경고: 파일이 존재하지 않습니다 — {cfg['cookies_file']}")
+
     cfg["preferred_languages"] = ["ko", "en"]
 
     # EC2 연결 테스트
