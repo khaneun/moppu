@@ -222,10 +222,33 @@ def scheduler() -> None:
     typer.echo(f"  upload_day_poll : {upload_day_cron} (KST)")
 
     # 전략 수립가 스케줄 (설정에서 enabled=true 일 때만) — KST 기준
+    # 대시보드(별도 프로세스)가 저장한 사이드카를 우선 적용
     sp_cfg = rt.cfg.strategy_planner
-    if sp_cfg.enabled:
-        from moppu.agent.strategy_planner import StrategyPlannerAgent
+    override_path = rt.cfg.app.data_dir / ".strategy_cfg.json"
 
+    def _load_override() -> dict:
+        try:
+            if override_path.exists():
+                import json as _json
+                return _json.loads(override_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return {}
+
+    ov = _load_override()
+    if "cron" in ov:
+        sp_cfg.cron = ov["cron"]
+    if "dry_run" in ov:
+        sp_cfg.dry_run = ov["dry_run"]
+    if "enabled" in ov:
+        sp_cfg.enabled = ov["enabled"]
+
+    from moppu.agent.strategy_planner import StrategyPlannerAgent
+
+    # planner 인스턴스는 한 번만 생성; cfg는 감시 잡에서 실시간 갱신
+    _active_cron: list[str] = [sp_cfg.cron]  # mutable container for closure
+
+    def _ensure_planner() -> None:
         if rt.strategy_planner is None:
             rt.strategy_planner = StrategyPlannerAgent(
                 cfg=sp_cfg,
@@ -235,26 +258,74 @@ def scheduler() -> None:
                 broker=rt.broker,
                 data_dir=rt.cfg.app.data_dir,
             )
+
+    if sp_cfg.enabled:
+        _ensure_planner()
+        typer.echo(f"  strategy_planner: {sp_cfg.cron} (KST, dry_run={sp_cfg.dry_run})")
+    else:
+        typer.echo("  strategy_planner: disabled (config: strategy_planner.enabled=false)")
+
+    def strategy_job() -> None:
+        if stop_file.exists():
+            typer.echo("  [SKIP] emergency stop active (strategy_planner)")
+            return
+        # dry_run·enabled는 잡 실행 시마다 사이드카에서 재확인
+        ov_now = _load_override()
+        if not ov_now.get("enabled", sp_cfg.enabled):
+            typer.echo("  [SKIP] strategy_planner disabled via dashboard")
+            return
+        _ensure_planner()
         planner = rt.strategy_planner
+        assert planner is not None
+        if "dry_run" in ov_now:
+            planner._cfg.dry_run = ov_now["dry_run"]  # noqa: SLF001
+        typer.echo(f"  [strategy_planner] 전략 수립 시작 (KST, dry_run={planner._cfg.dry_run})...")  # noqa: SLF001
+        try:
+            planner.run()
+        except Exception as e:
+            typer.echo(f"  [strategy_planner] 오류: {e}")
 
-        def strategy_job() -> None:
-            if stop_file.exists():
-                typer.echo("  [SKIP] emergency stop active (strategy_planner)")
-                return
-            typer.echo("  [strategy_planner] 전략 수립 시작 (KST)...")
-            try:
-                planner.run()
-            except Exception as e:
-                typer.echo(f"  [strategy_planner] 오류: {e}")
+    def config_watcher_job() -> None:
+        """1분마다 사이드카를 확인해 cron·enabled 변경을 스케줄러에 즉시 반영."""
+        ov_now = _load_override()
+        new_cron = ov_now.get("cron", sp_cfg.cron)
+        new_enabled = ov_now.get("enabled", sp_cfg.enabled)
 
+        job = sched.get_job("strategy_planner")
+
+        if new_enabled and job is None:
+            # 비활성 → 활성: 잡 신규 등록
+            _ensure_planner()
+            sched.add_job(
+                strategy_job,
+                CronTrigger.from_crontab(str(new_cron), timezone=KST),
+                id="strategy_planner",
+            )
+            _active_cron[0] = str(new_cron)
+            typer.echo(f"  [config_watcher] strategy_planner 활성화: {new_cron}")
+        elif not new_enabled and job is not None:
+            # 활성 → 비활성: 잡 제거
+            sched.remove_job("strategy_planner")
+            typer.echo("  [config_watcher] strategy_planner 비활성화")
+        elif new_enabled and job is not None and str(new_cron) != _active_cron[0]:
+            # cron 변경: 잡 재스케줄
+            sched.reschedule_job(
+                "strategy_planner",
+                trigger=CronTrigger.from_crontab(str(new_cron), timezone=KST),
+            )
+            typer.echo(f"  [config_watcher] strategy_planner cron 변경: {_active_cron[0]} → {new_cron}")
+            _active_cron[0] = str(new_cron)
+
+    if sp_cfg.enabled:
         sched.add_job(
             strategy_job,
             CronTrigger.from_crontab(sp_cfg.cron, timezone=KST),
             id="strategy_planner",
         )
-        typer.echo(f"  strategy_planner: {sp_cfg.cron} (KST, dry_run={sp_cfg.dry_run})")
-    else:
-        typer.echo("  strategy_planner: disabled (config: strategy_planner.enabled=false)")
+
+    # 대시보드 설정 변경을 1분마다 감지
+    sched.add_job(config_watcher_job, "interval", minutes=1, id="config_watcher")
+    typer.echo("  config_watcher : every 1 min")
 
     typer.echo("Scheduler started (timezone=Asia/Seoul). Ctrl-C to stop.")
     sched.start()
