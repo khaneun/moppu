@@ -54,6 +54,23 @@ def build_runtime() -> Runtime:
     if "agent_dry_run" in ov:
         cfg.agent.dry_run = bool(ov["agent_dry_run"])
 
+    # strategy_planner 사이드카(.strategy_cfg.json) — cli.py(scheduler)는
+    # 자체적으로 읽지만, dashboard 프로세스도 _rt.strategy_planner._cfg가
+    # 정상 값으로 시작해야 수동 실행 dry_run이 사용자 설정대로 적용된다.
+    import json as _json
+    sp_path = cfg.app.data_dir / ".strategy_cfg.json"
+    if sp_path.exists():
+        try:
+            sp_ov = _json.loads(sp_path.read_text(encoding="utf-8")) or {}
+            if "cron" in sp_ov:
+                cfg.strategy_planner.cron = sp_ov["cron"]
+            if "dry_run" in sp_ov:
+                cfg.strategy_planner.dry_run = bool(sp_ov["dry_run"])
+            if "enabled" in sp_ov:
+                cfg.strategy_planner.enabled = bool(sp_ov["enabled"])
+        except Exception:
+            pass
+
     configure_logging(cfg.app.log_level or settings.log_level)
 
     engine, SessionLocal = create_engine_and_session(cfg.storage.database_url)
