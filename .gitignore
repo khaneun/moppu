@@ -37,6 +37,11 @@ config/prompts/*.md
 kis_token.json
 *_token.json
 
+# Local collector — populated config (passwords/API keys) and YouTube auth cookies
+scripts/collector_config.json
+*cookies*.txt
+*cookies*.json
+
 # ── Runtime data & artifacts ──────────────────────────────────────────────────
 data/
 *.db
