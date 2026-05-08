@@ -21,6 +21,7 @@ from moppu.llm import build_llm
 from moppu.llm.base import LLMProvider
 from moppu.logging_setup import configure_logging
 from moppu.pipeline import Pipeline
+from moppu.runtime_overrides import load_overrides
 from moppu.storage import ChromaVectorStore, create_engine_and_session, init_db
 from moppu.storage.vectorstore import VectorStore
 
@@ -44,6 +45,14 @@ def build_runtime() -> Runtime:
     settings = Settings()
     cfg = load_app_config(settings.moppu_config_path)
     channels_cfg = load_channels(settings.moppu_channels_path)
+
+    # 사이드카 오버라이드: 대시보드/텔레그램에서 토글된 값이 재기동 후에도
+    # 살아있어야 하므로 .env/config.yaml 위에 덮어쓴다.
+    ov = load_overrides(cfg.app.data_dir)
+    if ov.get("kis_env") in ("real", "paper"):
+        settings.kis_env = ov["kis_env"]  # type: ignore[assignment]
+    if "agent_dry_run" in ov:
+        cfg.agent.dry_run = bool(ov["agent_dry_run"])
 
     configure_logging(cfg.app.log_level or settings.log_level)
 
@@ -89,7 +98,7 @@ def build_runtime() -> Runtime:
     )
 
     broker: Broker | None = None
-    if cfg.broker.provider == "kis" and settings.kis_app_key:
+    if cfg.broker.provider == "kis" and (settings.kis_app_key or settings.kis_paper_app_key):
         broker = KISBroker(cfg.broker.kis, settings)
 
     agent = TraderAgent(

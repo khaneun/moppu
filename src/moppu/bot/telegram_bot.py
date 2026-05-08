@@ -305,14 +305,20 @@ class TelegramBot:
         if not args or args[0].lower() not in {"on", "off"}:
             await update.message.reply_text("Usage: /dryrun on|off")
             return
-        self._agent._cfg.dry_run = args[0].lower() == "on"  # noqa: SLF001
-        await update.message.reply_text(f"dry_run = {self._agent._cfg.dry_run}")  # noqa: SLF001
+        from moppu.runtime_overrides import update_overrides
+        new_val = args[0].lower() == "on"
+        self._agent._cfg.dry_run = new_val  # noqa: SLF001
+        # 재기동 후에도 유지되도록 사이드카에 기록
+        update_overrides(self._pipeline._cfg.app.data_dir, agent_dry_run=new_val)  # noqa: SLF001
+        await update.message.reply_text(f"dry_run = {new_val}")
 
     async def _cmd_emergency(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:
+        from moppu.runtime_overrides import update_overrides
         stop_file = self._pipeline._cfg.app.data_dir / ".emergency_stop"  # noqa: SLF001
         stop_file.parent.mkdir(parents=True, exist_ok=True)
         stop_file.write_text("telegram emergency stop")
         self._agent._cfg.dry_run = True  # noqa: SLF001
+        update_overrides(self._pipeline._cfg.app.data_dir, agent_dry_run=True)  # noqa: SLF001
         await update.message.reply_text("🚨 긴급 중단 활성화. dry_run=true 전환됨.")
 
     async def _cmd_resume(self, update: Update, _: ContextTypes.DEFAULT_TYPE) -> None:

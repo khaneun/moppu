@@ -20,6 +20,7 @@ from moppu.config import Settings
 from moppu.llm import build_llm
 from moppu.logging_setup import get_logger
 from moppu.runtime import Runtime, build_runtime
+from moppu.runtime_overrides import update_overrides
 from moppu.storage.db import Channel, Transcript, TranscriptChunk, Video, VideoListEntry
 
 log = get_logger(__name__)
@@ -740,8 +741,12 @@ def update_kis_mode(req: KISModeRequest):
     try:
         new_broker = KISBroker(_rt.cfg.broker.kis, _rt.settings)
         _rt.agent._broker = new_broker
-        # Also replace in runtime
+        # strategy_planner도 broker 캐시를 들고 있으므로 함께 교체
+        if _rt.strategy_planner is not None:
+            _rt.strategy_planner._broker = new_broker  # noqa: SLF001
         object.__setattr__(_rt, "broker", new_broker)
+        # 재기동 후에도 모드가 유지되도록 사이드카에 기록
+        update_overrides(_rt.cfg.app.data_dir, kis_env=req.mode)
         return {"ok": True, "mode": req.mode}
     except Exception as e:
         raise HTTPException(400, f"브로커 재초기화 실패: {e}")
@@ -756,6 +761,8 @@ def update_dry_run(req: DryRunRequest):
     assert _rt is not None
     _rt.cfg.agent.dry_run = req.enabled
     _rt.agent._cfg.dry_run = req.enabled
+    # 재기동 후에도 dry_run 토글이 유지되도록 사이드카에 기록
+    update_overrides(_rt.cfg.app.data_dir, agent_dry_run=req.enabled)
     return {"ok": True, "dry_run": req.enabled}
 
 
@@ -772,6 +779,8 @@ def emergency_stop(req: EmergencyStopRequest):
         if _rt:
             _rt.cfg.agent.dry_run = True
             _rt.agent._cfg.dry_run = True
+            # 긴급 중단으로 인한 dry_run 전환도 재기동 후 유지
+            update_overrides(_rt.cfg.app.data_dir, agent_dry_run=True)
         return {"ok": True, "stopped": True, "message": "긴급 중단 활성화됨. dry_run=true 전환됨."}
     else:
         p.unlink(missing_ok=True)
@@ -1118,6 +1127,33 @@ def _strategy_history_dir() -> Path:
     return Path(base) / "strategy_history"
 
 
+def _strategy_override_path() -> Path:
+    base = _rt.cfg.app.data_dir if _rt else Path("data")
+    return Path(base) / ".strategy_cfg.json"
+
+
+def _read_strategy_override() -> dict[str, object]:
+    try:
+        p = _strategy_override_path()
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _write_strategy_override(cron: str, dry_run: bool, enabled: bool) -> None:
+    try:
+        p = _strategy_override_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            json.dumps({"cron": cron, "dry_run": dry_run, "enabled": enabled}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        log.warning("strategy.override_write_failed", err=str(e))
+
+
 def _recover_interrupted_strategy() -> None:
     """서버 재시작 시 RUNNING.json이 있으면 중단된 실행을 에러 이력으로 기록."""
     try:
@@ -1151,10 +1187,11 @@ def _recover_interrupted_strategy() -> None:
 def strategy_config():
     assert _rt is not None
     sp = _rt.cfg.strategy_planner
+    ov = _read_strategy_override()
     return {
-        "enabled": sp.enabled,
-        "cron": sp.cron,
-        "dry_run": sp.dry_run,
+        "enabled": ov.get("enabled", sp.enabled),
+        "cron": ov.get("cron", sp.cron),
+        "dry_run": ov.get("dry_run", sp.dry_run),
         "max_order_krw": sp.max_order_krw,
         "fund_request_wait_min": sp.fund_request_wait_min,
         "running": _strategy_running,
@@ -1178,6 +1215,9 @@ def update_strategy_config(req: StrategyScheduleRequest):
         _rt.strategy_planner._cfg.cron = req.cron        # noqa: SLF001
         _rt.strategy_planner._cfg.dry_run = req.dry_run  # noqa: SLF001
         _rt.strategy_planner._cfg.enabled = req.enabled  # noqa: SLF001
+    # 스케줄러 프로세스(별도 systemd 서비스)가 참조할 수 있도록 파일에 지속
+    # cron 변경은 스케줄러 재시작 시 반영, dry_run/enabled는 다음 잡 실행 시 반영
+    _write_strategy_override(cron=req.cron, dry_run=req.dry_run, enabled=req.enabled)
     return {"ok": True, "cron": req.cron, "dry_run": req.dry_run, "enabled": req.enabled}
 
 
