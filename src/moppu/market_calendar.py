@@ -14,7 +14,11 @@ import holidays
 
 @lru_cache(maxsize=8)
 def _kr_holidays(year: int) -> holidays.HolidayBase:
-    return holidays.country_holidays("KR", years=[year])
+    # language="ko" 미지원 환경(구버전·일부 로케일)을 대비한 fallback
+    try:
+        return holidays.country_holidays("KR", years=[year], language="ko")
+    except (TypeError, NotImplementedError):
+        return holidays.country_holidays("KR", years=[year])
 
 
 def kr_holiday_name(d: date) -> str | None:
