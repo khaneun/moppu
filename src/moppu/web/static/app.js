@@ -108,7 +108,12 @@ function formatDateTimeTwoLine(isoStr) {
 // Modals
 // ------------------------------------------------------------------ //
 
-function closeModal(id) { document.getElementById(id).style.display = 'none'; }
+function closeModal(id) {
+  document.getElementById(id).style.display = 'none';
+  if (id === 'ingest-detail-modal' && typeof _clearRetrySummaryPoll === 'function') {
+    _clearRetrySummaryPoll();
+  }
+}
 
 document.getElementById('summary-modal').addEventListener('click', (e) => {
   if (e.target === document.getElementById('summary-modal')) closeModal('summary-modal');
@@ -1435,17 +1440,72 @@ document.getElementById('ingest-detail-modal').addEventListener('click', (e) => 
   if (e.target === document.getElementById('ingest-detail-modal')) closeModal('ingest-detail-modal');
 });
 
+// 요약 재처리 폴링 핸들 (모달 종료 시 정리)
+let _retrySummaryPollTimer = null;
+let _retrySummaryPollVid = null;
+
+function _clearRetrySummaryPoll() {
+  if (_retrySummaryPollTimer) {
+    clearTimeout(_retrySummaryPollTimer);
+    _retrySummaryPollTimer = null;
+  }
+  _retrySummaryPollVid = null;
+}
+
+function _renderRetrySummaryStatus(state) {
+  // state: {status: 'queued'|'processing'|'done'|'failed', error, started_at, finished_at}
+  if (!state) return '';
+  const s = state.status;
+  if (s === 'queued') {
+    return '<span class="ingest-badge ingest-badge-pending">큐 대기</span> <span style="font-size:.75rem;color:var(--text-muted);margin-left:6px;">앞 작업 완료 후 시작합니다</span>';
+  }
+  if (s === 'processing') {
+    return '<span class="ingest-badge ingest-badge-pending">처리 중</span> <span style="font-size:.75rem;color:var(--text-muted);margin-left:6px;">요약 재생성 + 페르소나 업데이트 중</span>';
+  }
+  if (s === 'done') {
+    return '<span class="ingest-badge ingest-badge-embedded">완료</span> <span style="font-size:.75rem;color:var(--text-muted);margin-left:6px;">요약·페르소나가 갱신되었습니다</span>';
+  }
+  if (s === 'failed') {
+    return `<span class="ingest-badge ingest-badge-failed">실패</span><p class="text-warn" style="font-size:.78rem;margin-top:6px;">${escHtml(state.error || '오류')}</p>`;
+  }
+  return '';
+}
+
+async function _pollRetrySummary(videoId, statusEl) {
+  if (_retrySummaryPollVid !== videoId) return; // 모달이 다른 영상으로 바뀜
+  try {
+    const res = await API.get(`/api/pipeline/retry-summary/status?ids=${encodeURIComponent(videoId)}`);
+    const state = res[videoId];
+    if (state && statusEl) statusEl.innerHTML = _renderRetrySummaryStatus(state);
+    if (state && (state.status === 'done' || state.status === 'failed')) {
+      // 완료/실패 → 폴링 중단, 리스트 갱신
+      _clearRetrySummaryPoll();
+      try { loadIngestionHistory(_ingestPage); } catch (_) {}
+      try { loadPipeline(); } catch (_) {}
+      return;
+    }
+  } catch (e) {
+    // 일시 오류는 무시하고 다음 폴링 시도
+  }
+  _retrySummaryPollTimer = setTimeout(() => _pollRetrySummary(videoId, statusEl), 2000);
+}
+
 async function openIngestDetail(videoId) {
   const modal = document.getElementById('ingest-detail-modal');
   const body  = document.getElementById('ingest-modal-body');
   const dateEl = document.getElementById('ingest-modal-date');
 
+  _clearRetrySummaryPoll();
   dateEl.textContent = '';
   body.innerHTML = '<div class="modal-loading">로딩 중</div>';
   modal.style.display = 'flex';
 
   try {
-    const d = await API.get(`/api/pipeline/video/${encodeURIComponent(videoId)}`);
+    const [d, retryStatusRes] = await Promise.all([
+      API.get(`/api/pipeline/video/${encodeURIComponent(videoId)}`),
+      API.get(`/api/pipeline/retry-summary/status?ids=${encodeURIComponent(videoId)}`).catch(() => ({})),
+    ]);
+    const retryState = retryStatusRes ? retryStatusRes[videoId] : null;
     dateEl.textContent = d.created_at ? formatKoreanDateTime(d.created_at) : '';
     const url = d.url || `https://www.youtube.com/watch?v=${d.video_id}`;
 
@@ -1470,17 +1530,29 @@ async function openIngestDetail(videoId) {
       : '';
 
     // 임베딩 실패 → 로컬 수집기 재시도 / 요약 미반영 → 서버 측 요약만 재처리
-    const retryBtnHtml = ps === 'embed_failed'
-      ? `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
+    // 이미 진행 중이면 버튼 대신 진행 상태 표시
+    const inProgress = retryState && (retryState.status === 'queued' || retryState.status === 'processing');
+    let retryBlockHtml = '';
+    if (ps === 'embed_failed') {
+      retryBlockHtml = `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
           <button class="btn btn-primary btn-sm" data-retry-vid="${escHtml(d.video_id)}" data-retry-type="embed">↻ 임베딩 재시도</button>
           <p style="font-size:.72rem;color:var(--text-muted);margin-top:6px;">로컬 수집기에 재시도 신호를 보냅니다.</p>
-        </div>`
-      : ps === 'summary_missing'
-        ? `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
-            <button class="btn btn-secondary btn-sm" data-retry-vid="${escHtml(d.video_id)}" data-retry-type="summary">↻ 요약·페르소나 재처리</button>
-            <p style="font-size:.72rem;color:var(--text-muted);margin-top:6px;">임베딩은 유지하고 요약 재생성 + LSY 페르소나 업데이트만 수행합니다.</p>
-          </div>`
-        : '';
+        </div>`;
+    } else if (ps === 'summary_missing' || retryState) {
+      const buttonOrStatus = inProgress
+        ? `<div data-retry-status>${_renderRetrySummaryStatus(retryState)}</div>`
+        : retryState && retryState.status === 'failed'
+          ? `<div data-retry-status style="margin-bottom:8px;">${_renderRetrySummaryStatus(retryState)}</div>
+             <button class="btn btn-secondary btn-sm" data-retry-vid="${escHtml(d.video_id)}" data-retry-type="summary">↻ 다시 시도</button>`
+          : ps === 'summary_missing'
+            ? `<button class="btn btn-secondary btn-sm" data-retry-vid="${escHtml(d.video_id)}" data-retry-type="summary">↻ 요약·페르소나 재처리</button>
+               <div data-retry-status style="margin-top:8px;"></div>`
+            : `<div data-retry-status>${_renderRetrySummaryStatus(retryState)}</div>`;
+      retryBlockHtml = `<div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--border);">
+          ${buttonOrStatus}
+          <p style="font-size:.72rem;color:var(--text-muted);margin-top:6px;">임베딩은 유지하고 요약 재생성 + LSY 페르소나 업데이트만 수행합니다.</p>
+        </div>`;
+    }
 
     body.innerHTML = `
       <div style="margin-bottom:16px;">
@@ -1501,7 +1573,14 @@ async function openIngestDetail(videoId) {
         <p style="font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:6px;">영상</p>
         <a href="${escHtml(url)}" target="_blank" style="color:var(--primary);font-size:.85rem;word-break:break-all;">${escHtml(url)}</a>
       </div>
-      ${retryBtnHtml}`;
+      ${retryBlockHtml}`;
+
+    // 진행 중이면 즉시 폴링 시작
+    const statusEl = body.querySelector('[data-retry-status]');
+    if (inProgress && statusEl) {
+      _retrySummaryPollVid = videoId;
+      _pollRetrySummary(videoId, statusEl);
+    }
 
     const retryBtn = body.querySelector('[data-retry-vid]');
     if (retryBtn) {
@@ -1510,16 +1589,26 @@ async function openIngestDetail(videoId) {
         const label = type === 'summary' ? '요약·페르소나 재처리' : '임베딩 재시도';
         if (!confirm(`${label}합니다. 계속하시겠습니까?`)) return;
         retryBtn.disabled = true;
-        retryBtn.textContent = '처리 중...';
+        retryBtn.textContent = '요청 중...';
         try {
           const endpoint = type === 'summary'
             ? `/api/pipeline/retry-summary/${encodeURIComponent(retryBtn.dataset.retryVid)}`
             : `/api/pipeline/retry/${encodeURIComponent(retryBtn.dataset.retryVid)}`;
           const r = await API.post(endpoint, {});
-          alert(r.message || '요청 전송됨');
-          closeModal('ingest-detail-modal');
-          loadIngestionHistory(_ingestPage);
-          loadPipeline();
+          if (type === 'summary') {
+            // 버튼을 진행 상태로 교체하고 폴링 시작 (모달은 그대로 유지)
+            const statusEl2 = body.querySelector('[data-retry-status]');
+            const initial = { status: r.status || 'queued' };
+            if (statusEl2) statusEl2.innerHTML = _renderRetrySummaryStatus(initial);
+            retryBtn.remove();
+            _retrySummaryPollVid = retryBtn.dataset.retryVid;
+            _pollRetrySummary(retryBtn.dataset.retryVid, statusEl2);
+          } else {
+            alert(r.message || '요청 전송됨');
+            closeModal('ingest-detail-modal');
+            loadIngestionHistory(_ingestPage);
+            loadPipeline();
+          }
         } catch (e) {
           alert(e.message || '요청 실패');
           retryBtn.disabled = false;

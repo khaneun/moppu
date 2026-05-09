@@ -44,6 +44,7 @@ dependencies = [
 
     # Scheduling
     "apscheduler>=3.10",
+    "holidays>=0.50",
 
     # Dashboard
     "fastapi>=0.115",

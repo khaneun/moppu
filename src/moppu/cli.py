@@ -274,6 +274,14 @@ def scheduler() -> None:
         if not ov_now.get("enabled", sp_cfg.enabled):
             typer.echo("  [SKIP] strategy_planner disabled via dashboard")
             return
+        # 주말/한국 공휴일은 KRX 휴장 — 전략 수립 의미 없음
+        from datetime import datetime as _dt
+        from moppu.market_calendar import is_kr_market_holiday, kr_holiday_name
+        today_kst = _dt.now(KST).date()
+        if is_kr_market_holiday(today_kst):
+            label = kr_holiday_name(today_kst) or "주말"
+            typer.echo(f"  [SKIP] strategy_planner — KRX 휴장({label})")
+            return
         _ensure_planner()
         planner = rt.strategy_planner
         assert planner is not None
