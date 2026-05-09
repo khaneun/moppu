@@ -1893,9 +1893,27 @@ def retry_summary_only(video_id: str):
             from moppu.agent.persona import update_with_new
             try:
                 _write_pipeline_log(f"[RETRY-SUMMARY] {video_id} — 요약 재생성 중...")
+                # force_include_ids 로 limit(=5) 잘림을 우회 — 재처리 영상이
+                # daily_summary 의 videos 배열에 반드시 포함되어야 reflected_ids
+                # 에 들어가고 UI 상태가 "완료"로 갱신된다.
+                # 기존 파일에 들어있던 video_ids 도 union — 그러지 않으면 매번
+                # 직전에 추가된 영상만 살아남고 그 이전 영상은 limit=5 에 밀려
+                # 다시 "요약 미반영"으로 회귀한다.
+                include = {video_id}
+                if kst_date:
+                    existing_path = _rt.cfg.app.data_dir / f"daily_summary_{kst_date}.json"
+                    if existing_path.exists():
+                        try:
+                            existing = json.loads(existing_path.read_text(encoding="utf-8"))
+                            for v in existing.get("videos", []):
+                                if vid := v.get("video_id"):
+                                    include.add(vid)
+                        except Exception as e:
+                            log.warning("retry_summary.existing_read_failed", err=str(e))
                 generate_and_save(
                     _rt.session_factory, _rt.llm, _rt.cfg.app.data_dir,
                     force=True, update_persona=False, date_str=kst_date,
+                    force_include_ids=list(include),
                 )
                 update_with_new(_rt.session_factory, _rt.llm, _rt.cfg.app.data_dir, [video_id])
                 _write_pipeline_log(f"[RETRY-SUMMARY] {video_id} — 완료")

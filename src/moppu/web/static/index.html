@@ -204,25 +204,14 @@
         </div>
       </div>
 
-      <!-- 수집 이력 테이블 -->
-      <div class="card">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;">
-          <h3 style="margin:0;">수집 이력</h3>
+      <!-- 수집 이력 (모바일 카드) -->
+      <div class="card card-tight">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+          <h3 style="margin:0;font-size:1rem;">수집 이력</h3>
           <button id="btn-ingest-history-refresh" class="btn btn-secondary btn-sm">↻</button>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th style="width:140px;">수집일시</th>
-                <th>제목</th>
-                <th style="width:90px;text-align:center;">상태</th>
-              </tr>
-            </thead>
-            <tbody id="ingest-history-body">
-              <tr><td colspan="3" class="text-muted">로딩 중...</td></tr>
-            </tbody>
-          </table>
+        <div id="ingest-history-list" class="ingest-card-list">
+          <div class="ingest-card-empty">로딩 중...</div>
         </div>
         <div id="ingest-pagination" class="pagination-row" style="margin-top:12px;"></div>
       </div>

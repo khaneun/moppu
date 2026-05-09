@@ -1308,6 +1308,63 @@ input:checked + .slider::before { transform: translateX(20px); background: #fff;
   border: 1px solid rgba(239,68,68,.25);
 }
 
+/* 수집 이력 — 모바일 카드 레이아웃 */
+.card-tight { padding: 14px; }
+.ingest-card-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.ingest-card {
+  background: rgba(255,255,255,.02);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  transition: background .12s, border-color .12s;
+  -webkit-tap-highlight-color: transparent;
+}
+.ingest-card:active,
+.ingest-card:hover {
+  background: rgba(99,102,241,.08);
+  border-color: rgba(99,102,241,.35);
+}
+.ingest-card-row1 {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.ingest-card-time {
+  font-size: .72rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+.ingest-card-badge { display: flex; align-items: center; gap: 4px; }
+.ingest-card-title {
+  font-size: .87rem;
+  line-height: 1.35;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ingest-card-empty {
+  text-align: center;
+  color: var(--text-muted);
+  padding: 24px 0;
+  font-size: .85rem;
+}
+
+/* 모바일 화면(≤640px) — 카드 padding/gap 추가 보정 */
+@media (max-width: 640px) {
+  .card-tight { padding: 12px; }
+  .ingest-card { padding: 9px 10px; }
+  .ingest-card-title { font-size: .85rem; }
+  .ingest-card-time { font-size: .68rem; }
+  .ingest-badge { font-size: .64rem; padding: 2px 6px; }
+}
 
 .pagination-row {
   display: flex;

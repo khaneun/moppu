@@ -622,44 +622,74 @@ async function loadPipeline() {
 document.getElementById('btn-pipeline-refresh').addEventListener('click', () => loadPipeline());
 document.getElementById('btn-ingest-history-refresh').addEventListener('click', () => loadIngestionHistory(_ingestPage));
 
-document.getElementById('ingest-history-body').addEventListener('click', (e) => {
-  const tr = e.target.closest('tr[data-vid]');
-  if (tr) openIngestDetail(tr.dataset.vid);
+document.getElementById('ingest-history-list').addEventListener('click', (e) => {
+  const card = e.target.closest('.ingest-card[data-vid]');
+  if (card) openIngestDetail(card.dataset.vid);
 });
 
 // ---- Ingestion history ----
 
 let _ingestPage = 1;
+let _ingestPollTimer = null;
+let _ingestCurrentItems = [];
+
+function _clearIngestPoll() {
+  if (_ingestPollTimer) {
+    clearTimeout(_ingestPollTimer);
+    _ingestPollTimer = null;
+  }
+}
+
+// 우선순위: 진행 중인 retry-summary 작업 > video pipeline_status
+function _ingestBadgeHtml(item, retryState) {
+  if (retryState) {
+    if (retryState.status === 'queued')
+      return '<span class="ingest-badge ingest-badge-pending">대기 중</span>';
+    if (retryState.status === 'processing')
+      return '<span class="ingest-badge ingest-badge-pending">처리 중</span>';
+    if (retryState.status === 'failed')
+      return '<span class="ingest-badge ingest-badge-failed">재처리 실패</span>';
+    // status === 'done' → 정상 완료. pipeline_status 도 done 이 됐을 것이므로
+    // fall through 해서 일반 배지로 표시.
+  }
+  const ps = item.pipeline_status || item.status;
+  if (ps === 'done')           return '<span class="ingest-badge ingest-badge-embedded">완료</span>';
+  if (ps === 'summary_missing') return '<span class="ingest-badge ingest-badge-summary-missing">요약 미반영</span>';
+  if (ps === 'embed_failed')   return '<span class="ingest-badge ingest-badge-failed">임베딩 실패</span>';
+  return '<span class="ingest-badge ingest-badge-pending">대기</span>';
+}
 
 async function loadIngestionHistory(page) {
+  _clearIngestPoll();
   _ingestPage = page;
-  const tbody = document.getElementById('ingest-history-body');
+  const listEl = document.getElementById('ingest-history-list');
   const pagEl  = document.getElementById('ingest-pagination');
-  tbody.innerHTML = '<tr><td colspan="5" class="text-muted">로딩 중...</td></tr>';
+  listEl.innerHTML = '<div class="ingest-card-empty">로딩 중...</div>';
   try {
     const data = await API.get(`/api/pipeline/ingestion-history?page=${page}&per_page=10`);
     if (!data.items || !data.items.length) {
-      tbody.innerHTML = '<tr><td colspan="3" class="text-muted" style="text-align:center;padding:20px;">수집 이력이 없습니다.</td></tr>';
+      listEl.innerHTML = '<div class="ingest-card-empty">수집 이력이 없습니다.</div>';
       pagEl.innerHTML = '';
+      _ingestCurrentItems = [];
       return;
     }
+    _ingestCurrentItems = data.items;
 
-    tbody.innerHTML = data.items.map(v => {
-      const dt = v.created_at ? formatDateTimeTwoLine(v.created_at) : '-';
-      const title = trunc(v.title || v.video_id, 48);
-      const ps = v.pipeline_status || v.status;
-      const badge = ps === 'done'
-        ? '<span class="ingest-badge ingest-badge-embedded">완료</span>'
-        : ps === 'summary_missing'
-          ? '<span class="ingest-badge ingest-badge-summary-missing">요약미반영</span>'
-          : ps === 'embed_failed'
-            ? '<span class="ingest-badge ingest-badge-failed">임베딩실패</span>'
-            : '<span class="ingest-badge ingest-badge-pending">대기</span>';
-      return `<tr class="clickable-row" data-vid="${escHtml(v.video_id)}">
-        <td style="font-size:.76rem;width:140px;">${dt}</td>
-        <td style="font-size:.82rem;">${escHtml(title)}</td>
-        <td style="text-align:center;">${badge}</td>
-      </tr>`;
+    // 진행 중인 재처리 상태를 한 번에 조회
+    const ids = data.items.map(v => v.video_id).join(',');
+    const retryStatus = await API.get(`/api/pipeline/retry-summary/status?ids=${encodeURIComponent(ids)}`).catch(() => ({}));
+
+    listEl.innerHTML = data.items.map(v => {
+      const dt = v.created_at ? formatKoreanDateTime(v.created_at) : '-';
+      const title = v.title || v.video_id;
+      const badge = _ingestBadgeHtml(v, retryStatus[v.video_id]);
+      return `<div class="ingest-card" data-vid="${escHtml(v.video_id)}">
+        <div class="ingest-card-row1">
+          <span class="ingest-card-time">${escHtml(dt)}</span>
+          <span class="ingest-card-badge">${badge}</span>
+        </div>
+        <div class="ingest-card-title">${escHtml(title)}</div>
+      </div>`;
     }).join('');
 
     // 페이지네이션
@@ -675,9 +705,50 @@ async function loadIngestionHistory(page) {
     } else {
       pagEl.innerHTML = '';
     }
+
+    // 진행 중인 작업이 있으면 폴링으로 카드 배지 갱신
+    const hasInProgress = data.items.some(v => {
+      const s = retryStatus[v.video_id];
+      return s && (s.status === 'queued' || s.status === 'processing');
+    });
+    if (hasInProgress) {
+      _ingestPollTimer = setTimeout(_refreshIngestStatuses, 2500);
+    }
   } catch (e) {
-    tbody.innerHTML = `<tr><td colspan="3" class="text-warn">${escHtml(e.message)}</td></tr>`;
+    listEl.innerHTML = `<div class="ingest-card-empty text-warn">${escHtml(e.message)}</div>`;
     pagEl.innerHTML = '';
+  }
+}
+
+async function _refreshIngestStatuses() {
+  if (!_ingestCurrentItems.length) return;
+  try {
+    const ids = _ingestCurrentItems.map(v => v.video_id).join(',');
+    const retryStatus = await API.get(`/api/pipeline/retry-summary/status?ids=${encodeURIComponent(ids)}`);
+    let stillInProgress = false;
+    let anyJustFinished = false;
+    _ingestCurrentItems.forEach(v => {
+      const state = retryStatus[v.video_id];
+      const card = document.querySelector(`.ingest-card[data-vid="${CSS.escape(v.video_id)}"]`);
+      if (!card) return;
+      if (state && (state.status === 'queued' || state.status === 'processing')) {
+        stillInProgress = true;
+        const badgeEl = card.querySelector('.ingest-card-badge');
+        if (badgeEl) badgeEl.innerHTML = _ingestBadgeHtml(v, state);
+      } else if (state && (state.status === 'done' || state.status === 'failed')) {
+        anyJustFinished = true;
+        const badgeEl = card.querySelector('.ingest-card-badge');
+        if (badgeEl) badgeEl.innerHTML = _ingestBadgeHtml(v, state);
+      }
+    });
+    if (stillInProgress) {
+      _ingestPollTimer = setTimeout(_refreshIngestStatuses, 2500);
+    } else if (anyJustFinished) {
+      // 모두 완료/실패 → 한 번 리프레시로 진짜 pipeline_status 동기화
+      loadIngestionHistory(_ingestPage);
+    }
+  } catch (_) {
+    _ingestPollTimer = setTimeout(_refreshIngestStatuses, 5000);
   }
 }
 
@@ -1603,6 +1674,8 @@ async function openIngestDetail(videoId) {
             retryBtn.remove();
             _retrySummaryPollVid = retryBtn.dataset.retryVid;
             _pollRetrySummary(retryBtn.dataset.retryVid, statusEl2);
+            // 목록 카드도 즉시 큐 대기 배지로 갱신 (목록 폴링도 자동 시작됨)
+            try { loadIngestionHistory(_ingestPage); } catch (_) {}
           } else {
             alert(r.message || '요청 전송됨');
             closeModal('ingest-detail-modal');

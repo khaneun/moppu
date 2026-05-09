@@ -46,10 +46,15 @@ def generate_and_save(
     force: bool = False,
     update_persona: bool = True,
     date_str: str | None = None,
+    force_include_ids: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Generate LLM summary of ingested videos for a given date and write to disk.
 
     - ``date_str``: 대상 날짜 (KST, "YYYY-MM-DD"). None이면 오늘.
+    - ``force_include_ids``: 기본 limit(=5)에서 잘려나가는 영상 중 *반드시*
+      요약 결과에 포함시켜야 할 video_id 목록. 재처리("요약 미반영" 클릭)
+      경로에서 사용 — 그러지 않으면 6번째 이후 영상은 reflected_ids에
+      영영 들어가지 않아 상태 배지가 갱신되지 않는다.
     - Returns the result dict on success, or None when nothing was ingested.
     - Skips generation (returns cached) if the file already exists, unless ``force=True``.
     """
@@ -83,6 +88,26 @@ def generate_and_save(
             .limit(5)
             .all()
         )
+        # 재처리 경로: 명시 지정된 video_id 중 limit에서 빠진 것을 추가 포함
+        if force_include_ids:
+            already_fk = {t.video_fk for t in transcripts}
+            extra = (
+                s.query(Transcript)
+                .join(Video, Video.id == Transcript.video_fk)
+                .filter(
+                    Video.video_id.in_(force_include_ids),
+                    Video.status == "embedded",
+                )
+                .all()
+            )
+            for t in extra:
+                if t.video_fk not in already_fk:
+                    transcripts.append(t)
+                    already_fk.add(t.video_fk)
+            transcripts.sort(
+                key=lambda tr: s.query(Video.created_at).filter(Video.id == tr.video_fk).scalar(),
+                reverse=True,
+            )
         if not transcripts:
             log.info("daily_summary.no_videos", date=target_str)
             return None
