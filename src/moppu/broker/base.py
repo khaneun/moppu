@@ -86,3 +86,6 @@ class Broker(Protocol):
     def get_daily_trades(
         self, *, ticker: str | None = None, days: int = 30
     ) -> list[TradeFill]: ...
+    def get_max_buy_qty(
+        self, ticker: str, *, price: int = 0, market: bool = True
+    ) -> int: ...

@@ -1444,13 +1444,39 @@ function openStrategyDetail(item) {
   const sectorsAdd    = (item.sectors_to_add    || []).map(s => `<span class="sector-tag add">${escHtml(s)}</span>`).join('');
   const sectorsReduce = (item.sectors_to_reduce || []).map(s => `<span class="sector-tag reduce">${escHtml(s)}</span>`).join('');
 
-  // 매도/매수를 2줄 포맷으로 — 첫 줄: 종목+수량, 둘째 줄: 사유(줄글 전체)
+  // 실행 결과 → 배지 + 거부/스킵 사유. dry_run/미실행이면 null.
+  const execBadge = (ex) => {
+    if (!ex) return '';
+    if (ex.status === 'ok')       return '<span class="strategy-badge strategy-badge-ok">체결</span>';
+    if (ex.status === 'rejected') return '<span class="strategy-badge strategy-badge-error">거부</span>';
+    if (ex.status === 'skip')     return '<span class="strategy-badge" style="background:rgba(148,163,184,.15);color:#94a3b8;border:1px solid rgba(148,163,184,.3);">스킵</span>';
+    if (ex.status === 'error')    return '<span class="strategy-badge strategy-badge-error">오류</span>';
+    return '';
+  };
+  const execNote = (ex) => {
+    if (!ex) return '';
+    const msg = ex.message || ex.reason || ex.error;
+    if (!msg) return '';
+    return `<div class="exec-note">${escHtml(msg)}</div>`;
+  };
+  const qtyAdjusted = (ex, planQty) => {
+    if (!ex) return '';
+    if (ex.requested_qty != null && ex.requested_qty !== ex.qty) {
+      return `<span class="qty-adjust" title="요청 ${ex.requested_qty}주 → 주문가능 ${ex.qty}주">(요청 ${ex.requested_qty}주)</span>`;
+    }
+    return '';
+  };
+
   const renderSell = (s) => `
     <div class="strategy-trade-row-wrap">
       <span class="side-badge trade-side-sell">SELL</span>
       <div>
-        <div class="ticker-line">${s.name ? escHtml(s.name) + '(' + escHtml(s.ticker) + ')' : escHtml(s.ticker)}</div>
+        <div class="ticker-line">
+          ${s.name ? escHtml(s.name) + '(' + escHtml(s.ticker) + ')' : escHtml(s.ticker)}
+          ${execBadge(s.execution)}
+        </div>
         <div class="reason-line">${escHtml(s.reason || '')}</div>
+        ${execNote(s.execution)}
       </div>
       <span class="qty-line">${s.quantity < 0 ? '전량' : s.quantity + '주'}</span>
     </div>`;
@@ -1458,10 +1484,14 @@ function openStrategyDetail(item) {
     <div class="strategy-trade-row-wrap">
       <span class="side-badge trade-side-buy">BUY</span>
       <div>
-        <div class="ticker-line">${b.name ? escHtml(b.name) + '(' + escHtml(b.ticker) + ')' : escHtml(b.ticker)}</div>
+        <div class="ticker-line">
+          ${b.name ? escHtml(b.name) + '(' + escHtml(b.ticker) + ')' : escHtml(b.ticker)}
+          ${execBadge(b.execution)}
+        </div>
         <div class="reason-line">${escHtml(b.reason || '')}</div>
+        ${execNote(b.execution)}
       </div>
-      <span class="qty-line">${b.quantity}주 × ${b.price ? Math.round(b.price).toLocaleString('ko-KR') + '원' : '-'}</span>
+      <span class="qty-line">${b.quantity}주 ${qtyAdjusted(b.execution, b.quantity)} × ${b.price ? Math.round(b.price).toLocaleString('ko-KR') + '원' : '-'}</span>
     </div>`;
 
   const sells = (item.sells || []).map(renderSell).join('') || '<p class="text-muted" style="font-size:.8rem;">매도 없음</p>';

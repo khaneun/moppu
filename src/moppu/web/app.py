@@ -1435,12 +1435,23 @@ def strategy_history(page: int = 1, per_page: int = 10):
             data = json.loads(f.read_text(encoding="utf-8"))
             plan = data.get("plan") or {}
             error = data.get("error")
+            results = data.get("results") or []
+            # action 별로 (action, ticker) 키. 한 종목에 매도/매수가 동시 있을 일은 없으니 충돌 없음.
+            result_map = {(r.get("action"), r.get("ticker")): r for r in results}
             sells = [
-                {**s, "name": _ticker_name_cache.get(s.get("ticker", ""))}
+                {
+                    **s,
+                    "name": _ticker_name_cache.get(s.get("ticker", "")),
+                    "execution": result_map.get(("SELL", s.get("ticker", ""))),
+                }
                 for s in plan.get("sells", [])
             ]
             buys = [
-                {**b, "name": _ticker_name_cache.get(b.get("ticker", ""))}
+                {
+                    **b,
+                    "name": _ticker_name_cache.get(b.get("ticker", "")),
+                    "execution": result_map.get(("BUY", b.get("ticker", ""))),
+                }
                 for b in plan.get("buys", [])
             ]
             items.append({

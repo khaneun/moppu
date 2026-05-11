@@ -262,8 +262,18 @@ class StrategyPlannerAgent:
         executor = TradeExecutor(broker=self._broker, dry_run=self._cfg.dry_run)
         results = executor.execute(plan, positions)
         ok = sum(1 for r in results if r.get("status") == "ok")
+        rej = sum(1 for r in results if r.get("status") == "rejected")
+        skp = sum(1 for r in results if r.get("status") == "skip")
         err = sum(1 for r in results if r.get("status") == "error")
-        self._append_log(f"  실행 완료 — 성공 {ok}건, 실패 {err}건")
+        parts = [f"성공 {ok}건"]
+        if rej: parts.append(f"거부 {rej}건")
+        if skp: parts.append(f"스킵 {skp}건")
+        if err: parts.append(f"실패 {err}건")
+        self._append_log("  실행 완료 — " + ", ".join(parts))
+        for r in results:
+            if r.get("status") in ("rejected", "skip", "error"):
+                msg = r.get("message") or r.get("reason") or r.get("error") or ""
+                self._append_log(f"    · {r.get('action')} {r.get('ticker')}: {msg}")
 
         # 9. Telegram 완료 알림
         self._notify_completion(plan, results)
@@ -548,11 +558,31 @@ class StrategyPlannerAgent:
         )
 
         executed = sum(1 for r in results if r.get("status") == "ok")
+        rejected = sum(1 for r in results if r.get("status") == "rejected")
+        skipped = sum(1 for r in results if r.get("status") == "skip")
         failed = sum(1 for r in results if r.get("status") == "error")
         dry = self._cfg.dry_run
 
         mode_str = "🔵 DRY RUN" if dry else "🟢 실행완료"
-        tail = f"\n실행 {executed}건 / 실패 {failed}건" if not dry else ""
+        if not dry:
+            cnt_parts = [f"실행 {executed}건"]
+            if rejected: cnt_parts.append(f"거부 {rejected}건")
+            if skipped:  cnt_parts.append(f"스킵 {skipped}건")
+            if failed:   cnt_parts.append(f"실패 {failed}건")
+            tail = "\n" + " / ".join(cnt_parts)
+        else:
+            tail = ""
+
+        # 거부/스킵/실패 사유 상세
+        problem_lines: list[str] = []
+        for r in results:
+            st = r.get("status")
+            if st not in ("rejected", "skip", "error"):
+                continue
+            tag = {"rejected": "❌ 거부", "skip": "⏭️ 스킵", "error": "⚠️ 실패"}[st]
+            why = r.get("message") or r.get("reason") or r.get("error") or "사유 없음"
+            problem_lines.append(f"  {tag} {r.get('action')} {_fmt(r.get('ticker',''))}: {why}")
+        problem_block = ("\n\n*거부·스킵 사유*\n" + "\n".join(problem_lines)) if problem_lines else ""
 
         msg = (
             f"*[전략 수립가] {mode_str}*\n\n"
@@ -562,9 +592,13 @@ class StrategyPlannerAgent:
             f"예상 매도: {plan.total_sell_krw:,.0f}원\n"
             f"예상 매수: {plan.total_buy_krw:,.0f}원"
             f"{tail}"
+            f"{problem_block}"
         )
         send_telegram_message(self._settings, msg)
-        log.info("strategy_planner.notify_sent", dry_run=dry, executed=executed, failed=failed)
+        log.info(
+            "strategy_planner.notify_sent",
+            dry_run=dry, executed=executed, rejected=rejected, skipped=skipped, failed=failed,
+        )
 
 
 # ── 유틸 함수 ─────────────────────────────────────────────────────────────────

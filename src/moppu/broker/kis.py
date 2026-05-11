@@ -54,6 +54,10 @@ class KISBroker:
     TR_INQUIRE_BALANCE_REAL = "TTTC8434R"
     TR_INQUIRE_BALANCE_PAPER = "VTTC8434R"
 
+    # 매수가능조회 (주문가능현금 / 미수없는매수수량 / 최대매수수량)
+    TR_INQUIRE_PSBL_ORDER_REAL = "TTTC8908R"
+    TR_INQUIRE_PSBL_ORDER_PAPER = "VTTC8908R"
+
     # 주식일별주문체결조회 — 최대 3개월. TR은 실전/모의 공용이 아님.
     TR_DAILY_CCLD_REAL_3M = "TTTC8001R"
     TR_DAILY_CCLD_PAPER_3M = "VTTC8001R"
@@ -144,6 +148,42 @@ class KISBroker:
             status=str(data.get("rt_cd", "")),
             raw=data,
         )
+
+    def get_max_buy_qty(self, ticker: str, *, price: int = 0, market: bool = True) -> int:
+        """KIS 매수가능조회 — 시장가/지정가에 따라 미수없는 최대 매수수량을 반환.
+
+        시장가(market=True) 주문은 KIS가 상한가 기준으로 주문가능금액을 검증하므로,
+        plan 의 price × qty 가 예수금 이내라도 실제로는 거부될 수 있다. 본 메서드는
+        KIS 가 직접 계산해주는 nrcvb_buy_qty(미수없는매수수량) 를 우선 사용한다.
+        실패 시 0 반환 — 호출 측에서 fallback 결정.
+        """
+        tr_id = self.TR_INQUIRE_PSBL_ORDER_PAPER if self._is_paper else self.TR_INQUIRE_PSBL_ORDER_REAL
+        params = {
+            "CANO": self._account_cano(),
+            "ACNT_PRDT_CD": self._settings.kis_account_product_code,
+            "PDNO": ticker,
+            "ORD_UNPR": "0" if market else str(int(price or 0)),
+            "ORD_DVSN": "01" if market else "00",
+            "CMA_EVLU_AMT_ICLD_YN": "N",
+            "OVRS_ICLD_YN": "N",
+        }
+        try:
+            data = self._request(
+                "GET",
+                "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
+                tr_id=tr_id,
+                params=params,
+            )
+        except Exception as e:
+            log.warning("kis.psbl_order_failed", ticker=ticker, err=str(e))
+            return 0
+        out = data.get("output") or {}
+        # 미수없는매수수량을 우선 사용 (안전). 비어 있으면 최대매수수량으로 폴백.
+        qty_str = out.get("nrcvb_buy_qty") or out.get("max_buy_qty") or "0"
+        try:
+            return int(float(qty_str))
+        except (TypeError, ValueError):
+            return 0
 
     def _inquire_balance_raw(self) -> dict[str, Any]:
         tr_id = self.TR_INQUIRE_BALANCE_PAPER if self._is_paper else self.TR_INQUIRE_BALANCE_REAL
