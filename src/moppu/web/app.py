@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlalchemy import desc, func
@@ -187,9 +187,30 @@ async def auth_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def _static_version() -> str:
+    # app.js / style.css의 최신 mtime을 cache buster로 사용 — 매 배포마다 자동 갱신
+    try:
+        m = max(
+            (STATIC_DIR / "app.js").stat().st_mtime,
+            (STATIC_DIR / "style.css").stat().st_mtime,
+        )
+        return str(int(m))
+    except Exception:
+        return "0"
+
+
 @app.get("/")
 async def index():
-    return FileResponse(str(STATIC_DIR / "index.html"))
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    html = html.replace("{{STATIC_V}}", _static_version())
+    return HTMLResponse(
+        content=html,
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )
 
 
 # -------------------------------------------------------------------- #
