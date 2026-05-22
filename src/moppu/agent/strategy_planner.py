@@ -92,6 +92,12 @@ LSY 애널리스트의 섹터 분석과 종목 추천을 바탕으로, 현실적
   "sectors_to_add":    ["반도체", "이차전지"],
   "sectors_to_reduce": ["은행", "철강"]
 }
+
+## JSON 작성 규칙 (반드시 준수 — 위반 시 파싱 실패)
+- 숫자에 자릿수 구분자를 넣지 마세요: `61000.0` (O) / `61_000.0`·`61,000.0` (X)
+- price 는 따옴표 없는 숫자입니다: `"price": 61000.0` (O) / `"price": "61000"` (X)
+- reason 등 문자열 안에서는 큰따옴표(")를 쓰지 말고 작은따옴표(')를 사용하세요.
+- 배열·객체의 마지막 항목 뒤에 쉼표를 남기지 마세요(trailing comma 금지).
 """
 
 # ── LSY 대화 Turn 3 — JSON 추출 프롬프트 ────────────────────────────────────
@@ -310,7 +316,7 @@ class StrategyPlannerAgent:
         quotes: dict[str, float],
         cash: float,
         positions: list[Position],
-    ) -> TradePlan:
+    ) -> tuple[TradePlan, dict[str, int]]:
         quotes_text = (
             "\n".join(f"- {t}: {p:,.0f}원" for t, p in quotes.items())
             or "(시세 없음)"
@@ -353,7 +359,36 @@ class StrategyPlannerAgent:
         )
         log.info("strategy_planner.llm_plan_done", provider=resp.provider, usage=resp.usage)
 
+        usage: dict[str, int] = dict(resp.usage or {})
         plan = _parse_plan(resp.text)
+
+        # 1차 파싱 실패 시 — 깨진 응답을 보여주며 1회 재요청
+        if plan is None:
+            self._append_log("  [재시도] JSON 파싱 실패 — LLM에 재요청")
+            log.warning("strategy_planner.plan_retry")
+            retry_prompt = (
+                "직전에 출력한 아래 JSON 이 파싱에 실패했습니다. "
+                "동일한 내용을 유효한 JSON 객체 하나로만 다시 출력하세요.\n"
+                "- 코드 블록·주석·설명 없이 순수 JSON 만\n"
+                "- 숫자에 자릿수 구분자(_)나 콤마 금지 (예: 61000.0)\n"
+                "- 문자열 안에서는 큰따옴표(\") 대신 작은따옴표(') 사용\n"
+                "- 배열·객체 마지막 항목 뒤 쉼표 금지\n\n"
+                f"[직전 응답]\n{resp.text}"
+            )
+            resp2 = self._llm.chat(
+                messages=[ChatMessage(role="user", content=retry_prompt)],
+                system=_STRATEGY_SYSTEM,
+                temperature=0.0,
+                max_tokens=3000,
+            )
+            for k, v in (resp2.usage or {}).items():
+                usage[k] = usage.get(k, 0) + v
+            plan = _parse_plan(resp2.text)
+
+        if plan is None:
+            log.error("strategy_planner.plan_retry_failed")
+            self._append_log("  [실패] 재시도 후에도 JSON 파싱 실패 — 빈 계획으로 종료")
+            plan = TradePlan(summary="계획 파싱 실패 (재시도 후에도 실패)")
 
         # needs_additional_krw 계산
         sell_proceeds = _estimate_sell_proceeds(plan.sells, quotes, positions)
@@ -362,7 +397,7 @@ class StrategyPlannerAgent:
         shortfall = plan.total_buy_krw - cash - sell_proceeds
         plan.needs_additional_krw = max(0.0, shortfall)
 
-        return plan, resp.usage or {}
+        return plan, usage
 
     # ── 자금 요청 ─────────────────────────────────────────────────────────
 
@@ -644,8 +679,40 @@ def _parse_ticker_json(text: str) -> dict[str, list[str]]:
         return {"buy": list(dict.fromkeys(tickers)), "sell": []}
 
 
-def _parse_plan(text: str) -> TradePlan:
-    """전략 수립가 LLM 응답에서 TradePlan을 파싱합니다."""
+def _repair_json(s: str) -> str:
+    """LLM이 흔히 내는 JSON 표준 위반을 보수적으로 복구합니다.
+
+    - 숫자 자릿수 구분자 제거: 61_000.0 → 61000.0 (Python 리터럴이라 LLM이 종종 출력)
+    - trailing comma 제거: [.., ] / {.., } → [..] / {..}
+
+    문자열 리터럴 내부에도 적용될 수 있으나, 위 두 패턴은 한국어 reason
+    텍스트에 사실상 나타나지 않으므로 부작용은 무시할 수준입니다. 1차
+    파싱이 실패했을 때에만 호출됩니다.
+    """
+    s = re.sub(r"(?<=\d)_(?=\d)", "", s)        # 61_000 → 61000
+    s = re.sub(r",\s*([}\]])", r"\1", s)         # trailing comma 제거
+    return s
+
+
+def _loads_with_repair(candidate: str, *, raw: str) -> dict[str, Any] | None:
+    """json.loads — 1차 실패 시 흔한 LLM JSON 오류를 복구하고 재시도합니다."""
+    try:
+        return json.loads(candidate)
+    except json.JSONDecodeError as first_err:
+        repaired = _repair_json(candidate)
+        if repaired != candidate:
+            try:
+                data = json.loads(repaired)
+                log.info("strategy_planner.plan_json_repaired", err=str(first_err))
+                return data
+            except json.JSONDecodeError:
+                pass
+        log.error("strategy_planner.plan_parse_failed", err=str(first_err), raw=raw[:2000])
+        return None
+
+
+def _parse_plan(text: str) -> TradePlan | None:
+    """전략 수립가 LLM 응답에서 TradePlan을 파싱합니다. 실패 시 None 을 반환합니다."""
     candidate = _strip_code_fences(text).strip()
 
     # JSON 블록 추출 시도
@@ -653,18 +720,16 @@ def _parse_plan(text: str) -> TradePlan:
         match = re.search(r'\{[\s\S]*\}', candidate)
         candidate = match.group() if match else "{}"
 
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError as e:
-        log.error("strategy_planner.plan_parse_failed", err=str(e), raw=text[:400])
-        return TradePlan(summary=f"계획 파싱 실패: {e}")
+    data = _loads_with_repair(candidate, raw=text)
+    if data is None:
+        return None
 
     try:
         sells = [SellInstruction(**s) for s in data.get("sells", [])]
         buys = [BuyInstruction(**b) for b in data.get("buys", [])]
     except Exception as e:
-        log.error("strategy_planner.plan_model_failed", err=str(e))
-        return TradePlan(summary=f"계획 구성 실패: {e}")
+        log.error("strategy_planner.plan_model_failed", err=str(e), raw=text[:2000])
+        return None
 
     return TradePlan(
         sells=sells,
