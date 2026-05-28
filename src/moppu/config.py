@@ -186,6 +186,9 @@ class StrategyPlannerConfig(BaseModel):
     max_order_krw: int = 5_000_000
     # 자금 요청 후 재확인까지 대기 시간 (분)
     fund_request_wait_min: int = 10
+    # 체결 검증 — 주문 후 대기 시간(분) 및 미체결 분 재시도 최대 횟수
+    verify_wait_min: int = 5
+    verify_max_retries: int = 2
 
 
 class AppConfig(BaseModel):

@@ -123,8 +123,9 @@ def _place(broker: Broker, order: Order) -> dict[str, Any]:
             ticker=order.ticker,
             qty=order.quantity,
             order_id=ack.order_id,
+            odno=ack.kis_odno,
         )
-        return {"status": "ok", "order_id": ack.order_id}
+        return {"status": "ok", "order_id": ack.order_id, "odno": ack.kis_odno}
     except Exception as e:
         log.error("executor.order_failed", side=order.side.value, ticker=order.ticker, err=str(e))
         return {"status": "error", "error": str(e)}

@@ -26,6 +26,7 @@ class OrderAck:
     order_id: str
     status: str
     raw: Any = None
+    kis_odno: str = ""
 
 
 @dataclass(slots=True)
@@ -75,6 +76,7 @@ class TradeFill:
     avg_fill_price: float     # 평균체결단가
     total_amount: float       # 체결금액
     status: str               # "filled" | "partial" | "cancelled" | "rejected" | "pending"
+    order_id: str = ""        # ODNO — KIS 주문번호 (체결 매칭용)
 
 
 class Broker(Protocol):

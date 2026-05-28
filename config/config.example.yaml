@@ -92,3 +92,6 @@ strategy_planner:
   max_order_krw: 5000000
   # 자금 부족 시 Telegram 요청 후 재확인까지 대기 시간 (분)
   fund_request_wait_min: 10
+  # 매매 체결 검증: 주문 후 대기(분) 및 미체결 분량 재시도 최대 횟수
+  verify_wait_min: 5
+  verify_max_retries: 2

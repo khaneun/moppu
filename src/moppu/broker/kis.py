@@ -143,10 +143,12 @@ class KISBroker:
             tr_id=tr_id,
             json=body,
         )
+        output = data.get("output") or {}
         return OrderAck(
-            order_id=str(data.get("output", {}).get("KRX_FWDG_ORD_ORGNO", "")),
+            order_id=str(output.get("KRX_FWDG_ORD_ORGNO", "")),
             status=str(data.get("rt_cd", "")),
             raw=data,
+            kis_odno=str(output.get("ODNO", "") or ""),
         )
 
     def get_max_buy_qty(self, ticker: str, *, price: int = 0, market: bool = True) -> int:
@@ -325,6 +327,7 @@ class KISBroker:
                         avg_fill_price=float(row.get("avg_prvs", 0) or 0),
                         total_amount=float(row.get("tot_ccld_amt", 0) or 0),
                         status=status,
+                        order_id=str(row.get("odno", "") or ""),
                     ))
                 except Exception as e:
                     log.warning("kis.daily_ccld_row_parse_failed", err=str(e))

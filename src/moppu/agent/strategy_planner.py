@@ -16,7 +16,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from moppu.broker.base import Broker, Position
+from moppu.broker.base import Broker, Order, OrderSide, Position
 from moppu.config import Settings, StrategyPlannerConfig
 from moppu.llm.base import ChatMessage, LLMProvider
 from moppu.logging_setup import get_logger
@@ -265,6 +265,7 @@ class StrategyPlannerAgent:
 
         # 8. 실행 위임
         self._append_log(f"  실행 중 (dry_run={self._cfg.dry_run})...")
+        exec_started_at = datetime.now(KST)
         executor = TradeExecutor(broker=self._broker, dry_run=self._cfg.dry_run)
         results = executor.execute(plan, positions)
         ok = sum(1 for r in results if r.get("status") == "ok")
@@ -281,13 +282,19 @@ class StrategyPlannerAgent:
                 msg = r.get("message") or r.get("reason") or r.get("error") or ""
                 self._append_log(f"    · {r.get('action')} {r.get('ticker')}: {msg}")
 
-        # 9. Telegram 완료 알림
-        self._notify_completion(plan, results)
+        # 9. 체결 검증 + 미체결 재시도 (dry_run=False, ok 주문이 있을 때만)
+        verification: list[dict[str, Any]] = []
+        if not self._cfg.dry_run and any(r.get("status") == "ok" for r in results):
+            verification = self._verify_and_retry(results, exec_started_at)
+
+        # 10. Telegram 완료 알림
+        self._notify_completion(plan, results, verification)
         self._append_log("=== 전략 수립 완료 ===")
 
         return {
             "plan": plan.model_dump(),
             "results": results,
+            "verification": verification,
             "usage": _acc_usage,
             "provider": self._llm.name,
             "model": self._llm.model,
@@ -544,6 +551,221 @@ class StrategyPlannerAgent:
             needs_additional_krw=0.0,
         )
 
+    # ── 체결 검증 + 미체결 재시도 ────────────────────────────────────────
+    #
+    # `place_order(rt_cd=0)` 는 주문 *접수* 일 뿐 체결이 아니다. 시가 매수가
+    # LP 부재/거래정지/동시호가 적체 등으로 체결되지 않는 경우가 실제로
+    # 관찰됐다 → 일정 시간 대기 후 KIS 일별 주문/체결 조회로 ODNO 단위
+    # 체결량을 확인하고, 부족분만 시장가로 재주문한다.
+
+    def _verify_and_retry(
+        self,
+        exec_results: list[dict[str, Any]],
+        exec_started_at: datetime,
+    ) -> list[dict[str, Any]]:
+        """매매 실행 결과를 검증하고 미체결 분량을 재시도한다.
+
+        Returns: 각 원 주문에 대한 최종 검증 결과 리스트.
+        """
+        # 추적 대상: status='ok' 였던 주문들. ODNO 기준 매칭.
+        tracked: list[dict[str, Any]] = []
+        for r in exec_results:
+            if r.get("status") != "ok":
+                continue
+            odno = str(r.get("odno") or "")
+            if not odno:
+                # ODNO 없으면 매칭 불가 — 추적 제외하고 그냥 ok 로 기록만
+                self._append_log(
+                    f"  [검증] ODNO 누락으로 추적 불가: {r.get('action')} {r.get('ticker')}"
+                )
+                continue
+            tracked.append({
+                "action": r.get("action"),
+                "ticker": r.get("ticker"),
+                "ordered": int(r.get("qty") or 0),
+                "odnos": [odno],          # 재시도 시 누적
+                "filled": 0,
+                "retries": 0,
+                "final_status": "pending",
+            })
+
+        if not tracked:
+            self._append_log("  [검증] 추적할 ok 주문 없음 — 검증 단계 스킵")
+            return []
+
+        wait_min = max(0, int(self._cfg.verify_wait_min))
+        max_retries = max(0, int(self._cfg.verify_max_retries))
+        attempt = 0
+
+        while attempt <= max_retries:
+            self._append_log(
+                f"  [검증 {attempt}/{max_retries}] {wait_min}분 대기 후 체결 조회..."
+            )
+            if wait_min > 0:
+                time.sleep(wait_min * 60)
+
+            fill_by_odno = self._collect_fills_by_odno()
+            today_date = datetime.now(KST).strftime("%Y%m%d")
+
+            # 각 추적 항목의 누적 체결량 갱신
+            pending_after: list[dict[str, Any]] = []
+            for item in tracked:
+                if item["final_status"] == "filled":
+                    continue
+                filled_total = 0
+                any_cancelled = False
+                for od in item["odnos"]:
+                    f = fill_by_odno.get(od)
+                    if f is None:
+                        continue
+                    # 오늘자 주문만 — 휴장/날짜 경계 보호
+                    if f.order_date and f.order_date != today_date:
+                        continue
+                    filled_total += int(f.filled_qty or 0)
+                    if f.status == "cancelled":
+                        any_cancelled = True
+                item["filled"] = filled_total
+                missing = max(0, int(item["ordered"]) - filled_total)
+                if missing == 0:
+                    item["final_status"] = "filled"
+                else:
+                    item["_missing"] = missing
+                    item["_cancelled_seen"] = any_cancelled
+                    pending_after.append(item)
+
+            if not pending_after:
+                self._append_log("  [검증] 모든 주문 체결 완료")
+                break
+
+            # 재시도 한도 도달했으면 미체결 그대로 종료
+            if attempt == max_retries:
+                for item in pending_after:
+                    item["final_status"] = (
+                        "partial" if item["filled"] > 0 else "unfilled"
+                    )
+                self._append_log(
+                    f"  [검증] 재시도 한도 도달 — 미체결 {len(pending_after)}건"
+                )
+                break
+
+            # 미체결 분량 재주문
+            self._append_log(
+                f"  [재시도 {attempt + 1}/{max_retries}] 미체결 {len(pending_after)}건 재주문..."
+            )
+            for item in pending_after:
+                missing = int(item.get("_missing") or 0)
+                if missing <= 0:
+                    continue
+                side = item["action"]
+                ticker = item["ticker"]
+                qty = missing
+
+                # 매수는 예수금 캡 다시 확인 — 1차 주문이 일부 체결됐다면
+                # 예수금이 부족할 수 있음.
+                if side == "BUY":
+                    try:
+                        max_qty = self._broker.get_max_buy_qty(ticker, market=True)
+                    except Exception as e:
+                        log.warning(
+                            "strategy_planner.retry_psbl_failed", ticker=ticker, err=str(e)
+                        )
+                        max_qty = qty
+                    if max_qty <= 0:
+                        self._append_log(
+                            f"    · BUY {ticker} {missing}주 재시도 스킵 — 예수금 부족"
+                        )
+                        item["final_status"] = "partial" if item["filled"] > 0 else "unfilled"
+                        item["retries"] += 1
+                        continue
+                    if qty > max_qty:
+                        qty = max_qty
+
+                order = Order(
+                    ticker=ticker,
+                    side=OrderSide.BUY if side == "BUY" else OrderSide.SELL,
+                    quantity=qty,
+                    order_type="market",
+                )
+                ack_result = self._place_retry(order)
+                item["retries"] += 1
+                if ack_result.get("status") == "ok":
+                    new_odno = str(ack_result.get("odno") or "")
+                    if new_odno:
+                        item["odnos"].append(new_odno)
+                    self._append_log(
+                        f"    · {side} {ticker} {qty}주 재주문 접수 (ODNO={new_odno})"
+                    )
+                else:
+                    why = (
+                        ack_result.get("message")
+                        or ack_result.get("error")
+                        or ack_result.get("reason")
+                        or "사유 없음"
+                    )
+                    self._append_log(
+                        f"    · {side} {ticker} {qty}주 재주문 실패: {why}"
+                    )
+
+            attempt += 1
+
+        # 정리 — 내부 키 제거
+        for item in tracked:
+            item.pop("_missing", None)
+            item.pop("_cancelled_seen", None)
+
+        return tracked
+
+    def _collect_fills_by_odno(self) -> dict[str, Any]:
+        """오늘자 일별 체결 조회 → {ODNO: TradeFill} 맵."""
+        try:
+            fills = self._broker.get_daily_trades(days=1)
+        except Exception as e:
+            self._append_log(f"  [검증] 체결 조회 실패: {e}")
+            log.warning("strategy_planner.verify_daily_ccld_failed", err=str(e))
+            return {}
+        out: dict[str, Any] = {}
+        for f in fills:
+            odno = getattr(f, "order_id", "") or ""
+            if not odno:
+                continue
+            # 동일 ODNO 가 여러 행으로 분산되는 경우(부분체결 누적)는 KIS 응답상
+            # 합산되어 있으므로 단일 행 매칭으로 충분. 만약 들어오면 최신을
+            # 그대로 사용 (역순 정렬이므로 첫 항목).
+            if odno not in out:
+                out[odno] = f
+        return out
+
+    def _place_retry(self, order: Order) -> dict[str, Any]:
+        """재주문 — executor._place 와 동일 로직(broker 직접 호출)."""
+        try:
+            ack = self._broker.place_order(order)
+            if ack.status != "0":
+                raw = ack.raw or {}
+                msg = str(raw.get("msg1") or "").strip() or "주문 거부"
+                log.warning(
+                    "strategy_planner.retry_rejected",
+                    side=order.side.value,
+                    ticker=order.ticker,
+                    qty=order.quantity,
+                    rt_cd=ack.status,
+                    msg=msg,
+                )
+                return {"status": "rejected", "message": msg}
+            log.info(
+                "strategy_planner.retry_placed",
+                side=order.side.value,
+                ticker=order.ticker,
+                qty=order.quantity,
+                odno=ack.kis_odno,
+            )
+            return {"status": "ok", "odno": ack.kis_odno, "order_id": ack.order_id}
+        except Exception as e:
+            log.error(
+                "strategy_planner.retry_failed",
+                side=order.side.value, ticker=order.ticker, err=str(e),
+            )
+            return {"status": "error", "error": str(e)}
+
     # ── 이력 저장 ─────────────────────────────────────────────────────────
 
     def _save_history(self, result: dict[str, Any]) -> None:
@@ -572,7 +794,12 @@ class StrategyPlannerAgent:
 
     # ── 완료 알림 ─────────────────────────────────────────────────────────
 
-    def _notify_completion(self, plan: TradePlan, results: list[dict]) -> None:
+    def _notify_completion(
+        self,
+        plan: TradePlan,
+        results: list[dict],
+        verification: list[dict] | None = None,
+    ) -> None:
         from moppu.bot.telegram_bot import send_telegram_message
 
         def _fmt(ticker: str) -> str:
@@ -619,6 +846,41 @@ class StrategyPlannerAgent:
             problem_lines.append(f"  {tag} {r.get('action')} {_fmt(r.get('ticker',''))}: {why}")
         problem_block = ("\n\n*거부·스킵 사유*\n" + "\n".join(problem_lines)) if problem_lines else ""
 
+        # 체결 검증 결과 섹션
+        verify_block = ""
+        v_filled = v_partial = v_unfilled = 0
+        if verification:
+            v_lines: list[str] = []
+            for v in verification:
+                fs = v.get("final_status")
+                ticker = v.get("ticker") or ""
+                ordered = int(v.get("ordered") or 0)
+                filled = int(v.get("filled") or 0)
+                retries = int(v.get("retries") or 0)
+                action = v.get("action") or ""
+                retry_tag = f" (재시도 {retries}회)" if retries else ""
+                if fs == "filled":
+                    v_filled += 1
+                    v_lines.append(
+                        f"  ✅ {action} {_fmt(ticker)} {filled}주 체결{retry_tag}"
+                    )
+                elif fs == "partial":
+                    v_partial += 1
+                    v_lines.append(
+                        f"  ⚠️ {action} {_fmt(ticker)} 부분체결 {filled}/{ordered}주{retry_tag}"
+                    )
+                else:  # unfilled, pending
+                    v_unfilled += 1
+                    v_lines.append(
+                        f"  ❌ {action} {_fmt(ticker)} 미체결 0/{ordered}주{retry_tag}"
+                    )
+            head_parts = [f"체결 {v_filled}건"]
+            if v_partial:
+                head_parts.append(f"부분 {v_partial}건")
+            if v_unfilled:
+                head_parts.append(f"미체결 {v_unfilled}건")
+            verify_block = "\n\n*체결 검증* — " + " / ".join(head_parts) + "\n" + "\n".join(v_lines)
+
         msg = (
             f"*[전략 수립가] {mode_str}*\n\n"
             f"📋 {plan.summary[:400]}\n\n"
@@ -628,11 +890,13 @@ class StrategyPlannerAgent:
             f"예상 매수: {plan.total_buy_krw:,.0f}원"
             f"{tail}"
             f"{problem_block}"
+            f"{verify_block}"
         )
         send_telegram_message(self._settings, msg)
         log.info(
             "strategy_planner.notify_sent",
             dry_run=dry, executed=executed, rejected=rejected, skipped=skipped, failed=failed,
+            verify_filled=v_filled, verify_partial=v_partial, verify_unfilled=v_unfilled,
         )
 
 
