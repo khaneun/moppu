@@ -16,13 +16,15 @@ Docs: https://apiportal.koreainvestment.com/apiservice
 
 from __future__ import annotations
 
+import json as _jsonlib
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from moppu.broker.base import AccountSummary, Order, OrderAck, OrderSide, Position, Quote, TradeFill
 from moppu.config import KISBrokerConfig, Settings
@@ -64,7 +66,13 @@ class KISBroker:
 
     TR_INQUIRE_PRICE = "FHKST01010100"
 
-    def __init__(self, cfg: KISBrokerConfig, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        cfg: KISBrokerConfig,
+        settings: Settings | None = None,
+        *,
+        token_cache_path: Path | None = None,
+    ) -> None:
         settings = settings or Settings()
         self._settings = settings
         self._cfg = cfg
@@ -73,6 +81,10 @@ class KISBroker:
         self._is_paper = settings.kis_env != "real"
         self._client = httpx.Client(base_url=self._base_url, timeout=20.0)
         self._token: _Token | None = None
+        # 대시보드/스케줄러/봇 3개 프로세스가 같은 app key 로 각자 토큰을 들고 있으면
+        # KIS 가 재발급 시 이전 토큰을 무효화 → 다른 프로세스가 모르고 쓰다 HTTP 500.
+        # 파일 캐시를 공유해 프로세스 간 토큰을 하나로 수렴시킨다.
+        self._token_cache_path = token_cache_path
 
         missing = [k for k in ("kis_app_key", "kis_app_secret", "kis_account_no") if not getattr(settings, k)]
         if missing:
@@ -94,19 +106,35 @@ class KISBroker:
             return self._settings.kis_paper_app_secret
         return self._settings.kis_app_secret or ""
 
-    def _auth_header(self) -> dict[str, str]:
+    def _auth_header(self, token: str | None = None) -> dict[str, str]:
         return {
-            "authorization": f"Bearer {self._get_token()}",
+            "authorization": f"Bearer {token or self._get_token()}",
             "appkey": self._app_key,
             "appsecret": self._app_secret,
             "content-type": "application/json; charset=utf-8",
         }
 
-    def _get_token(self) -> str:
-        now = time.time()
-        if self._token and self._token.expires_at > now + 60:
-            return self._token.value
+    def _read_shared_token(self) -> _Token | None:
+        if not self._token_cache_path:
+            return None
+        try:
+            raw = _jsonlib.loads(self._token_cache_path.read_text())
+            return _Token(value=str(raw["value"]), expires_at=float(raw["expires_at"]))
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
 
+    def _write_shared_token(self, token: _Token) -> None:
+        if not self._token_cache_path:
+            return
+        try:
+            self._token_cache_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._token_cache_path.with_suffix(self._token_cache_path.suffix + ".tmp")
+            tmp.write_text(_jsonlib.dumps({"value": token.value, "expires_at": token.expires_at}))
+            tmp.replace(self._token_cache_path)
+        except OSError as e:
+            log.warning("kis.token_cache_write_failed", err=str(e))
+
+    def _issue_token(self) -> _Token:
         resp = self._client.post(
             "/oauth2/tokenP",
             json={
@@ -117,10 +145,40 @@ class KISBroker:
         )
         resp.raise_for_status()
         data = resp.json()
-        self._token = _Token(
+        token = _Token(
             value=data["access_token"],
-            expires_at=now + int(data.get("expires_in", 60 * 60 * 23)),
+            expires_at=time.time() + int(data.get("expires_in", 60 * 60 * 23)),
         )
+        self._write_shared_token(token)
+        log.info("kis.token_issued", env=self._settings.kis_env)
+        return token
+
+    def _get_token(self) -> str:
+        now = time.time()
+        if self._token and self._token.expires_at > now + 60:
+            return self._token.value
+        # 다른 프로세스가 이미 발급한 공유 토큰이 있으면 재발급 없이 채택한다.
+        shared = self._read_shared_token()
+        if shared and shared.expires_at > now + 60:
+            self._token = shared
+            return shared.value
+        self._token = self._issue_token()
+        return self._token.value
+
+    def _refresh_after_auth_failure(self, failed_value: str) -> str:
+        """인증 실패 후 토큰 복구.
+
+        다른 프로세스가 이미 새 토큰을 발급했다면(파일의 값이 방금 실패한
+        값과 다르면) 그것을 채택해 불필요한 재발급/무효화 churn 을 막는다.
+        아니면 직접 새로 발급한다.
+        """
+        now = time.time()
+        shared = self._read_shared_token()
+        if shared and shared.value != failed_value and shared.expires_at > now + 60:
+            self._token = shared
+            log.info("kis.token_adopted_shared", env=self._settings.kis_env)
+            return shared.value
+        self._token = self._issue_token()
         return self._token.value
 
     # ------------------------------------------------------------------ #
@@ -381,7 +439,19 @@ class KISBroker:
             return self._settings.kis_paper_account_no[:8]
         return (self._settings.kis_account_no or "")[:8]
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, max=10), reraise=True)
+    # 무효화된 토큰을 쓰면 KIS 가 401/403 뿐 아니라 500 으로도 응답한다(실전
+    # inquire-balance 등). 해당 상태코드는 토큰을 갱신해 1회 재시도한다.
+    _AUTH_RETRY_STATUSES = frozenset({401, 403, 500})
+
+    # 네트워크/전송 오류만 tenacity 가 백오프 재시도한다. HTTP 상태코드는
+    # 아래에서 토큰 갱신을 동반해 직접 처리하므로 무효 토큰을 같은 값으로
+    # 3번 반복 재시도하던 문제가 사라진다.
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, max=10),
+        retry=retry_if_exception_type(httpx.TransportError),
+        reraise=True,
+    )
     def _request(
         self,
         method: str,
@@ -391,10 +461,23 @@ class KISBroker:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        headers = {**self._auth_header(), "tr_id": tr_id, "custtype": "P"}
-        resp = self._client.request(method, path, headers=headers, params=params, json=json)
-        resp.raise_for_status()
-        data = resp.json()
-        if data.get("rt_cd") not in (None, "0"):
-            log.warning("kis.non_success", path=path, tr_id=tr_id, msg=data.get("msg1"))
-        return data
+        for attempt in (1, 2):
+            token = self._get_token()
+            headers = {**self._auth_header(token), "tr_id": tr_id, "custtype": "P"}
+            resp = self._client.request(method, path, headers=headers, params=params, json=json)
+            if attempt == 1 and resp.status_code in self._AUTH_RETRY_STATUSES:
+                log.warning(
+                    "kis.auth_retry",
+                    path=path,
+                    tr_id=tr_id,
+                    status=resp.status_code,
+                    body=resp.text[:500],
+                )
+                self._refresh_after_auth_failure(token)
+                continue
+            resp.raise_for_status()
+            data = resp.json()
+            if data.get("rt_cd") not in (None, "0"):
+                log.warning("kis.non_success", path=path, tr_id=tr_id, msg=data.get("msg1"))
+            return data
+        raise RuntimeError("unreachable")  # pragma: no cover

@@ -116,7 +116,10 @@ def build_runtime() -> Runtime:
 
     broker: Broker | None = None
     if cfg.broker.provider == "kis" and (settings.kis_app_key or settings.kis_paper_app_key):
-        broker = KISBroker(cfg.broker.kis, settings)
+        # 3개 프로세스(대시보드/스케줄러/봇)가 같은 토큰 파일을 공유해
+        # 상호 무효화로 인한 HTTP 500 을 막는다. 환경(real/paper)별로 분리.
+        token_cache = cfg.app.data_dir / f".kis_token_{settings.kis_env}.json"
+        broker = KISBroker(cfg.broker.kis, settings, token_cache_path=token_cache)
 
     agent = TraderAgent(
         cfg=cfg.agent,
