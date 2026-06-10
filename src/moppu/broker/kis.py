@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
 
 from moppu.broker.base import AccountSummary, Order, OrderAck, OrderSide, Position, Quote, TradeFill
 from moppu.config import KISBrokerConfig, Settings
@@ -439,19 +438,15 @@ class KISBroker:
             return self._settings.kis_paper_account_no[:8]
         return (self._settings.kis_account_no or "")[:8]
 
-    # 무효화된 토큰을 쓰면 KIS 가 401/403 뿐 아니라 500 으로도 응답한다(실전
-    # inquire-balance 등). 해당 상태코드는 토큰을 갱신해 1회 재시도한다.
-    _AUTH_RETRY_STATUSES = frozenset({401, 403, 500})
+    # 토큰 만료/무효 시 KIS 가 내려주는 msg_cd. 이때만 토큰을 재발급한다.
+    _TOKEN_ERROR_MSG_CDS = frozenset({"EGW00121", "EGW00123", "EGW00106"})
 
-    # 네트워크/전송 오류만 tenacity 가 백오프 재시도한다. HTTP 상태코드는
-    # 아래에서 토큰 갱신을 동반해 직접 처리하므로 무효 토큰을 같은 값으로
-    # 3번 반복 재시도하던 문제가 사라진다.
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, max=10),
-        retry=retry_if_exception_type(httpx.TransportError),
-        reraise=True,
-    )
+    # 초당 거래건수 초과(EGW00201) 등 일시적 오류. KIS 는 이 경우 rt_cd=1,
+    # msg_cd=EGW00201 과 함께 HTTP 500 을 내려준다. 토큰과 무관하므로
+    # 짧게 백오프한 뒤 같은 토큰으로 재시도해야 한다(토큰 재발급은 오히려
+    # 발급 throttle 403(EGW00133) 을 유발).
+    _MAX_ATTEMPTS = 4
+
     def _request(
         self,
         method: str,
@@ -461,23 +456,63 @@ class KISBroker:
         params: dict[str, Any] | None = None,
         json: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        for attempt in (1, 2):
+        last_resp: httpx.Response | None = None
+        for attempt in range(self._MAX_ATTEMPTS):
             token = self._get_token()
             headers = {**self._auth_header(token), "tr_id": tr_id, "custtype": "P"}
-            resp = self._client.request(method, path, headers=headers, params=params, json=json)
-            if attempt == 1 and resp.status_code in self._AUTH_RETRY_STATUSES:
+            try:
+                resp = self._client.request(method, path, headers=headers, params=params, json=json)
+            except httpx.TransportError as e:
+                if attempt + 1 >= self._MAX_ATTEMPTS:
+                    raise
+                log.warning("kis.transport_retry", path=path, tr_id=tr_id, err=str(e))
+                time.sleep(0.5 * (attempt + 1))
+                continue
+
+            if resp.is_success:
+                data = resp.json()
+                if data.get("rt_cd") not in (None, "0"):
+                    log.warning("kis.non_success", path=path, tr_id=tr_id, msg=data.get("msg1"))
+                return data
+
+            last_resp = resp
+            msg_cd, msg1 = "", ""
+            try:
+                body = resp.json()
+                msg_cd, msg1 = body.get("msg_cd", ""), body.get("msg1", "")
+            except (ValueError, AttributeError):
+                pass
+            is_last = attempt + 1 >= self._MAX_ATTEMPTS
+            is_token_error = resp.status_code == 401 or msg_cd in self._TOKEN_ERROR_MSG_CDS
+            # 초당 거래건수 초과(EGW00201)는 HTTP 500 으로 내려온다.
+            is_transient = resp.status_code >= 500 or msg_cd == "EGW00201"
+
+            # (1) 토큰 만료/무효 → 토큰 갱신 후 재시도 (재발급 churn 방지를 위해
+            #     다른 프로세스가 이미 발급한 공유 토큰을 우선 채택).
+            if is_token_error and not is_last:
                 log.warning(
-                    "kis.auth_retry",
-                    path=path,
-                    tr_id=tr_id,
-                    status=resp.status_code,
-                    body=resp.text[:500],
+                    "kis.token_refresh", path=path, tr_id=tr_id,
+                    status=resp.status_code, msg_cd=msg_cd,
                 )
                 self._refresh_after_auth_failure(token)
                 continue
+            # (2) 초당 거래건수 초과 / 5xx 일시 오류 → 백오프 후 같은 토큰으로 재시도.
+            if is_transient and not is_last:
+                log.warning(
+                    "kis.rate_limited_retry", path=path, tr_id=tr_id,
+                    status=resp.status_code, msg_cd=msg_cd, msg=msg1, attempt=attempt + 1,
+                )
+                time.sleep(0.4 + 0.5 * attempt)
+                continue
+
+            # 재시도 대상이 아니거나 마지막 시도 → 에러 본문을 남기고 raise.
+            log.warning(
+                "kis.request_failed", path=path, tr_id=tr_id,
+                status=resp.status_code, msg_cd=msg_cd, msg=msg1, body=resp.text[:500],
+            )
             resp.raise_for_status()
-            data = resp.json()
-            if data.get("rt_cd") not in (None, "0"):
-                log.warning("kis.non_success", path=path, tr_id=tr_id, msg=data.get("msg1"))
-            return data
-        raise RuntimeError("unreachable")  # pragma: no cover
+            return resp.json()
+
+        assert last_resp is not None  # pragma: no cover
+        last_resp.raise_for_status()
+        return last_resp.json()  # pragma: no cover
