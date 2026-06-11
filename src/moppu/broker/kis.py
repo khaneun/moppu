@@ -17,6 +17,7 @@ Docs: https://apiportal.koreainvestment.com/apiservice
 from __future__ import annotations
 
 import json as _jsonlib
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -445,7 +446,7 @@ class KISBroker:
     # msg_cd=EGW00201 과 함께 HTTP 500 을 내려준다. 토큰과 무관하므로
     # 짧게 백오프한 뒤 같은 토큰으로 재시도해야 한다(토큰 재발급은 오히려
     # 발급 throttle 403(EGW00133) 을 유발).
-    _MAX_ATTEMPTS = 4
+    _MAX_ATTEMPTS = 6
 
     def _request(
         self,
@@ -483,7 +484,13 @@ class KISBroker:
             except (ValueError, AttributeError):
                 pass
             is_last = attempt + 1 >= self._MAX_ATTEMPTS
-            is_token_error = resp.status_code == 401 or msg_cd in self._TOKEN_ERROR_MSG_CDS
+            # 진짜 토큰 만료/무효는 401 로 온다. 레이트리밋 폭주 중 KIS 가 500 과
+            # 함께 EGW0012x 를 흘리는 경우가 있는데(2026-06-11 09:30 장애), 이를
+            # 토큰에러로 오인해 재발급하면 재시도 1회를 낭비하고 발급 트랜잭션이
+            # TPS 압박을 가중시킨다 → 500 이면 토큰에러로 보지 않는다.
+            is_token_error = resp.status_code == 401 or (
+                msg_cd in self._TOKEN_ERROR_MSG_CDS and resp.status_code < 500
+            )
             # 초당 거래건수 초과(EGW00201)는 HTTP 500 으로 내려온다.
             is_transient = resp.status_code >= 500 or msg_cd == "EGW00201"
 
@@ -502,7 +509,9 @@ class KISBroker:
                     "kis.rate_limited_retry", path=path, tr_id=tr_id,
                     status=resp.status_code, msg_cd=msg_cd, msg=msg1, attempt=attempt + 1,
                 )
-                time.sleep(0.4 + 0.5 * attempt)
+                # 정각 충돌 시 여러 프로세스가 같은 백오프로 동시 재시도하면 또
+                # 부딪힌다 → 지터를 섞어 재시도 타이밍을 분산한다.
+                time.sleep(0.4 + 0.5 * attempt + random.uniform(0.0, 0.3))
                 continue
 
             # 재시도 대상이 아니거나 마지막 시도 → 에러 본문을 남기고 raise.
